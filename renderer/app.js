@@ -677,6 +677,7 @@ async function completeRegistration() {
   const name = (document.getElementById('reg-name-input')?.value || '').trim();
   const username = (document.getElementById('reg-username')?.value || '').trim();
   const errEl = document.getElementById('reg-error');
+  const btn = document.getElementById('reg-submit-btn');
 
   if (!name || name.length < 2) {
     errEl.textContent = 'Please enter your name (at least 2 characters)';
@@ -691,21 +692,35 @@ async function completeRegistration() {
 
   errEl.style.display = 'none';
 
+  // Disable button and show loading state to prevent double-clicks
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Setting up...';
+  }
+
   try {
+    console.log('[reg] calling registerProfile...');
     await window.landrop.registerProfile({
       email: '',
       name: name,
       username: username,
     });
+    console.log('[reg] registerProfile done, hiding overlay');
 
     document.getElementById('registration-overlay').style.display = 'none';
     document.getElementById('my-device-name').textContent = username;
     showToast(`Welcome, ${name}!`, 'success');
+    console.log('[reg] starting initApp (non-blocking)');
     // Don't await — let discovery happen in background so UI doesn't hang
     initApp().catch(e => console.error('Init after registration:', e));
   } catch (e) {
+    console.error('[reg] error:', e);
     errEl.textContent = 'Registration failed: ' + (e.message || 'Unknown error');
     errEl.style.display = 'block';
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Get Started';
+    }
   }
 }
 
