@@ -69,6 +69,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   on('manual-peer-ip', 'keydown', (e) => { if (e.key === 'Enter') connectManualPeer(); });
   on('manual-peer-port', 'keydown', (e) => { if (e.key === 'Enter') connectManualPeer(); });
 
+  // Factory reset
+  on('btn-factory-reset', 'click', async () => {
+    await window.landrop.factoryReset();
+  });
+
   // Bug report
   on('btn-send-bugreport', 'click', () => {
     window.landrop.openExternal('mailto:f20230844@pilani.bits-pilani.ac.in?subject=LANDrop%20Bug%20Report&body=Bug%20Description:%0A%0ASteps%20to%20Reproduce:%0A1.%0A2.%0A3.%0A%0AExpected%20Behavior:%0A%0AOS%20%26%20Version:%0A');
@@ -557,7 +562,7 @@ async function showDiagStatus() {
       `UDP Broadcast Port: ${s.udpPort}`,
       `Beacon Server:      ${s.beaconActive ? '✅ Listening on port ' + s.beaconPort : '❌ NOT running'}`,
       `Subnet Scanner:     ${s.scannerActive ? '✅ Active (every 30s)' : '❌ NOT running'}`,
-      `Wide Campus Scan:   ${s.wideScanActive ? '✅ Active (every 2min)' + (s.wideScanRunning ? ' — scanning now…' : '') : '❌ NOT running'}`,
+      `UDP Campus Blaster: ${s.udpBlasterActive ? '✅ Active (every 15s, ~65K unicast beacons)' : '❌ NOT running'}`,
       `Firewall Rules:     ${s.firewallConfigured ? '✅ Applied' : '⚠️ Not applied (Windows only)'}`,
       ``,
       `=== Network Interfaces ===`,
@@ -565,7 +570,7 @@ async function showDiagStatus() {
       ``,
       `=== Discovered Peers (${s.peerCount}) ===`,
       ...s.peers.map(p => `  ${p.name} [${p.platform}] — ${p.addresses.join(', ')}:${p.port} (host: ${p.host}) — seen ${Math.round((Date.now() - p.lastSeen)/1000)}s ago`),
-      s.peerCount === 0 ? '  (none — local scan every 30s, wide campus scan every 2min)' : '',
+      s.peerCount === 0 ? '  (none — UDP blaster runs every 15s, peers should appear within seconds)' : '',
       ``,
       `Log entries: ${s.logCount}`,
     ];

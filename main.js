@@ -1323,101 +1323,122 @@ async function scanSubnets() {
   dlog('scanner', 'scan-complete', `found ${found} peers from ${ipList.length} IPs`);
 }
 
-// ─── Wide Campus Scan ─────────────────────────────────────────────────────────
-// On college/campus networks, devices can be on completely different /23 VLANs
-// within the same /16 (e.g. 172.17.35.x vs 172.17.61.x).  mDNS and UDP
-// broadcasts never cross VLAN boundaries, and the local subnet scanner only
-// hits the immediate /23 block.
+// ─── Wide Campus Scan (UDP Unicast Blaster) ──────────────────────────────────
+// On college/campus networks, devices land on different /23 VLANs within the
+// same /16 (e.g. 172.17.35.x vs 172.17.61.x).  UDP broadcasts and mDNS
+// multicast are VLAN-scoped and never cross these boundaries.
 //
-// The wide scan probes the ENTIRE third-octet range (0–255) on port 41235
-// (the discovery beacon port) with low concurrency so we don't flood the
-// network.  It only sends one probe per /23 block (the .1 address) first,
-// and if that responds, it fans out into the full block.  This keeps the
-// scan lightweight while covering the whole campus.
+// Solution: send a UDP beacon packet *directly* (unicast) to every single IP
+// in the /16 on UDP_BROADCAST_PORT (41234).  Every LANDrop peer already has a
+// UDP socket listening on that port — when they receive our beacon, they'll
+// register us as a peer from the existing udpSocket.on('message') handler.
+// And when they send their next periodic beacon, it'll hit our local subnet
+// broadcast — but we won't even need that, because they already got our info
+// from the unicast packet we sent.
+//
+// Sending ~65K small UDP packets takes about 1–3 seconds.  No TCP handshake,
+// no timeout waiting, no connection state.  Fire and forget.
 // ─────────────────────────────────────────────────────────────────────────────
 
 let wideScanInterval = null;
-let wideScanRunning = false;
 
-async function wideCampusScan() {
-  if (wideScanRunning) return;            // don't overlap scans
-  wideScanRunning = true;
+function sendWideCampusBeacons() {
+  if (!udpSocket) {
+    dlog('wide-scan', 'skip', 'UDP socket not ready');
+    return;
+  }
 
   const subnets = getSubnetsToScan();
-  if (subnets.length === 0) { wideScanRunning = false; return; }
+  if (subnets.length === 0) return;
 
-  // We operate on the first two octets of each local interface
-  // e.g.  172.17.x.x  →  scan 172.17.0.1 through 172.17.255.254
+  const beacon = JSON.stringify({
+    type: 'landrop-beacon',
+    id: DEVICE_ID,
+    name: getDisplayName(),
+    port: actualPort,
+    platform: process.platform,
+    mac: myMacAddress,
+  });
+  const buf = Buffer.from(beacon, 'utf8');
+
+  // Collect /16 prefixes and our own local /23 blocks to skip
   const prefixes = new Set();
+  const myBlocks = new Set();
   const myIPs = new Set();
   for (const s of subnets) {
     prefixes.add(`${s.networkParts[0]}.${s.networkParts[1]}`);
     myIPs.add(s.myIP);
+    myBlocks.add(s.networkParts[2] & 0xFE);
   }
 
-  let found = 0;
-  const BATCH = 20;   // low concurrency to be network-friendly
+  let sent = 0;
+  let errors = 0;
 
   for (const prefix of prefixes) {
-    // Phase 1 — probe one sentinel IP (.1) per /23 block across the whole /16
-    //           This is 128 probes covering all 256 third-octets (even ones: 0,2,4…254)
-    const sentinels = [];
-    for (let thirdOctet = 0; thirdOctet <= 254; thirdOctet += 2) {
-      const ip = `${prefix}.${thirdOctet}.1`;
-      if (!myIPs.has(ip)) sentinels.push(ip);
-    }
+    for (let c = 0; c <= 255; c++) {
+      const blockStart = c & 0xFE;
+      if (myBlocks.has(blockStart)) continue; // local scanner + broadcast already covers this
 
-    dlog('wide-scan', 'phase1-start', `${sentinels.length} sentinel probes on ${prefix}.x.x`);
-    const liveBlocks = [];   // third-octets where we got a hit
-
-    for (let i = 0; i < sentinels.length; i += BATCH) {
-      const batch = sentinels.slice(i, i + BATCH);
-      const results = await Promise.all(
-        batch.map(ip => probeDiscoveryPort(ip).then(r => r ? { ip, ...r } : null))
-      );
-      for (const r of results) {
-        if (!r) continue;
-        if (processScanResult(r)) found++;
-        // Mark this /23 block as live so phase 2 fills it out
-        const parts = r.ip.split('.').map(Number);
-        const blockStart = parts[2] & 0xFE;  // even-aligned for /23
-        liveBlocks.push(blockStart);
-      }
-    }
-
-    // Phase 2 — for each /23 block where a sentinel responded, scan the full block
-    const phase2IPs = new Set();
-    for (const blockStart of liveBlocks) {
-      for (let c = blockStart; c <= blockStart + 1 && c <= 255; c++) {
-        for (let d = 1; d <= 254; d++) {
-          const ip = `${prefix}.${c}.${d}`;
-          if (!myIPs.has(ip)) phase2IPs.add(ip);
+      for (let d = 1; d <= 254; d++) {
+        const ip = `${prefix}.${c}.${d}`;
+        if (myIPs.has(ip)) continue;
+        try {
+          udpSocket.send(buf, 0, buf.length, UDP_BROADCAST_PORT, ip);
+          sent++;
+        } catch (e) {
+          errors++;
+          if (errors > 100) {
+            // Something is very wrong, bail out
+            dlog('wide-scan', 'abort', `too many send errors: ${e.message}`);
+            return;
+          }
         }
       }
     }
-
-    if (phase2IPs.size > 0) {
-      dlog('wide-scan', 'phase2-start', `${phase2IPs.size} IPs in ${liveBlocks.length} live blocks`);
-      const phase2List = Array.from(phase2IPs);
-      for (let i = 0; i < phase2List.length; i += BATCH) {
-        const batch = phase2List.slice(i, i + BATCH);
-        const results = await Promise.all(
-          batch.map(ip => probeDiscoveryPort(ip).then(r => r ? { ip, ...r } : null))
-        );
-        for (const r of results) {
-          if (!r) continue;
-          if (processScanResult(r)) found++;
-        }
-      }
-    }
-
-    dlog('wide-scan', 'prefix-done', `${prefix}.x.x — found ${found} total`);
   }
 
-  store.set('knownPeerIPs', knownPeerIPs);
-  if (found > 0) sendToRenderer('peers-updated', getVisiblePeers());
-  dlog('wide-scan', 'complete', `found ${found} peers across campus`);
-  wideScanRunning = false;
+  dlog('wide-scan', 'sent', `${sent} unicast beacons across ${Array.from(prefixes).join(', ')}.x.x (${errors} errors)`);
+}
+
+// Also send targeted beacons to the broadcast address of every /23 block
+// in the /16 — in case the campus switch forwards directed broadcasts
+function sendWideBroadcastBeacons() {
+  if (!udpSocket) return;
+
+  const subnets = getSubnetsToScan();
+  if (subnets.length === 0) return;
+
+  const beacon = JSON.stringify({
+    type: 'landrop-beacon',
+    id: DEVICE_ID,
+    name: getDisplayName(),
+    port: actualPort,
+    platform: process.platform,
+    mac: myMacAddress,
+  });
+  const buf = Buffer.from(beacon, 'utf8');
+
+  const prefixes = new Set();
+  const myBlocks = new Set();
+  for (const s of subnets) {
+    prefixes.add(`${s.networkParts[0]}.${s.networkParts[1]}`);
+    myBlocks.add(s.networkParts[2] & 0xFE);
+  }
+
+  let sent = 0;
+  for (const prefix of prefixes) {
+    for (let blockStart = 0; blockStart <= 254; blockStart += 2) {
+      if (myBlocks.has(blockStart)) continue;
+      // Broadcast for this /23 block is blockStart+1.255
+      const bcast = `${prefix}.${blockStart + 1}.255`;
+      try {
+        udpSocket.send(buf, 0, buf.length, UDP_BROADCAST_PORT, bcast);
+        sent++;
+      } catch (e) {}
+    }
+  }
+
+  dlog('wide-scan', 'broadcast-sweep', `${sent} directed broadcasts sent`);
 }
 
 function startSubnetScanner() {
@@ -1426,10 +1447,18 @@ function startSubnetScanner() {
   // Then local scan every 30 seconds
   subnetScanInterval = setInterval(() => scanSubnets(), 30000);
 
-  // Wide campus scan: first run after 10 seconds, then every 2 minutes
-  // (slower cadence since it covers much more ground)
-  setTimeout(() => wideCampusScan(), 10000);
-  wideScanInterval = setInterval(() => wideCampusScan(), 120000);
+  // Wide campus UDP unicast blaster:
+  // First blast after 3 seconds (fast!), then every 15 seconds.
+  // Each run sends ~65K tiny UDP packets in ~2 seconds — fire and forget.
+  // Any LANDrop peer that receives it will register us immediately.
+  setTimeout(() => {
+    sendWideBroadcastBeacons();  // try directed broadcasts first (cheapest)
+    sendWideCampusBeacons();     // then full unicast sweep
+  }, 3000);
+  wideScanInterval = setInterval(() => {
+    sendWideBroadcastBeacons();
+    sendWideCampusBeacons();
+  }, 15000);
 }
 
 function stopSubnetScanner() {
@@ -1909,8 +1938,7 @@ function setupIPC() {
       beaconActive: !!discoveryBeaconServer,
       beaconPort: DISCOVERY_PORT,
       scannerActive: !!subnetScanInterval,
-      wideScanActive: !!wideScanInterval,
-      wideScanRunning: wideScanRunning,
+      udpBlasterActive: !!wideScanInterval,
       firewallConfigured: firewallConfigured,
       peerCount: peers.size,
       peers: Array.from(peers.values()).map(p => ({ id: p.id.slice(0,8), name: p.name, host: p.host, port: p.port, platform: p.platform, addresses: p.addresses, lastSeen: p.lastSeen })),
@@ -1923,6 +1951,49 @@ function setupIPC() {
     store.delete('firewallVersion');
     firewallConfigured = false;
     ensureWindowsFirewall();
+    return { ok: true };
+  });
+
+  // ── Factory Reset: wipe all LANDrop data ──
+  ipcMain.handle('factory-reset', async () => {
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      buttons: ['Cancel', 'Delete Everything'],
+      defaultId: 0,
+      cancelId: 0,
+      title: 'Reset LANDrop',
+      message: 'Delete all LANDrop data?',
+      detail: 'This will remove your profile, chat history, settings, shared folder index, and the LANDrop downloads folder. This cannot be undone.',
+    });
+    if (response !== 1) return { ok: false, reason: 'cancelled' };
+
+    // 1. Clear electron-store (config.json)
+    store.clear();
+
+    // 2. Remove downloads folder
+    try {
+      const dlPath = downloadPath || path.join(os.homedir(), 'Downloads', 'LANDrop');
+      if (fs.existsSync(dlPath)) fs.rmSync(dlPath, { recursive: true, force: true });
+    } catch (e) {}
+
+    // 3. Remove Windows firewall rules
+    if (process.platform === 'win32') {
+      try {
+        execFile('netsh', ['advfirewall', 'firewall', 'delete', 'rule', 'name=LANDrop App TCP In']);
+        execFile('netsh', ['advfirewall', 'firewall', 'delete', 'rule', 'name=LANDrop App TCP Out']);
+        execFile('netsh', ['advfirewall', 'firewall', 'delete', 'rule', 'name=LANDrop App UDP In']);
+        execFile('netsh', ['advfirewall', 'firewall', 'delete', 'rule', 'name=LANDrop App UDP Out']);
+      } catch (e) {}
+    }
+
+    // 4. Remove the electron-store config file itself
+    try {
+      const configPath = path.join(app.getPath('userData'), 'config.json');
+      if (fs.existsSync(configPath)) fs.unlinkSync(configPath);
+    } catch (e) {}
+
+    // 5. Quit the app
+    app.quit();
     return { ok: true };
   });
 

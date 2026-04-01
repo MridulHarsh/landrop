@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld('landrop', {
   getDiscoveryLog: () => ipcRenderer.invoke('get-discovery-log'),
   getDiscoveryStatus: () => ipcRenderer.invoke('get-discovery-status'),
   resetFirewall: () => ipcRenderer.invoke('reset-firewall'),
+  factoryReset: () => ipcRenderer.invoke('factory-reset'),
 
   // Manual Peer Connection
   connectPeerIP: (opts) => ipcRenderer.invoke('connect-peer-ip', opts),
