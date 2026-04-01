@@ -557,6 +557,7 @@ async function showDiagStatus() {
       `UDP Broadcast Port: ${s.udpPort}`,
       `Beacon Server:      ${s.beaconActive ? '✅ Listening on port ' + s.beaconPort : '❌ NOT running'}`,
       `Subnet Scanner:     ${s.scannerActive ? '✅ Active (every 30s)' : '❌ NOT running'}`,
+      `Wide Campus Scan:   ${s.wideScanActive ? '✅ Active (every 2min)' + (s.wideScanRunning ? ' — scanning now…' : '') : '❌ NOT running'}`,
       `Firewall Rules:     ${s.firewallConfigured ? '✅ Applied' : '⚠️ Not applied (Windows only)'}`,
       ``,
       `=== Network Interfaces ===`,
@@ -564,7 +565,7 @@ async function showDiagStatus() {
       ``,
       `=== Discovered Peers (${s.peerCount}) ===`,
       ...s.peers.map(p => `  ${p.name} [${p.platform}] — ${p.addresses.join(', ')}:${p.port} (host: ${p.host}) — seen ${Math.round((Date.now() - p.lastSeen)/1000)}s ago`),
-      s.peerCount === 0 ? '  (none — wait ~30s for subnet scan to complete)' : '',
+      s.peerCount === 0 ? '  (none — local scan every 30s, wide campus scan every 2min)' : '',
       ``,
       `Log entries: ${s.logCount}`,
     ];

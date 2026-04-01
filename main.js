@@ -1259,38 +1259,52 @@ function probeDiscoveryPort(ip) {
   });
 }
 
+// Helper: process scan results (shared by local and wide scan)
+function processScanResult(r) {
+  const existing = peers.get(r.deviceId);
+  let peerMac = r.mac || null;
+  if (peerMac) peerMac = peerMac.toUpperCase();
+  if (isPeerBlocked(peerMac)) return false;
+
+  if (!existing) {
+    dlog('scanner', 'new-peer', { name: r.deviceName, ip: r.ip, port: r.port, platform: r.platform });
+  }
+
+  peers.set(r.deviceId, {
+    id: r.deviceId,
+    name: r.deviceName || r.ip,
+    host: r.ip,
+    port: r.port,
+    platform: r.platform || 'unknown',
+    addresses: [r.ip],
+    mac: peerMac,
+    lastSeen: Date.now(),
+  });
+
+  // Also save as known peer for fast reconnection
+  knownPeerIPs = knownPeerIPs.filter(k => k.ip !== r.ip);
+  knownPeerIPs.push({ ip: r.ip, port: r.port, lastSeen: Date.now() });
+
+  if (!existing) {
+    const p = peers.get(r.deviceId);
+    if (p) setTimeout(() => syncCatalogFromPeer(p), 1000);
+  }
+  return true;
+}
+
 async function scanSubnets() {
   const subnets = getSubnetsToScan();
   if (subnets.length === 0) return;
 
-  // Also scan adjacent /23 subnets — on college networks, devices often land
-  // in neighbouring subnets (e.g. 172.17.34.0/23 and 172.17.36.0/23)
+  // Scan our own /23 (or whatever the local subnet is)
   const allIPs = new Set();
   for (const subnet of subnets) {
     const ips = generateIPsForSubnet(subnet);
     ips.forEach(ip => allIPs.add(ip));
-
-    // Add the adjacent /23 block (one above and one below)
-    // e.g. if we're on 172.17.34.0/23, also scan 172.17.36.0/23 and 172.17.32.0/23
-    if (subnet.inverseMask[2] >= 1) {
-      // /23 or wider — scan the neighbouring blocks
-      const thirdOctet = subnet.networkParts[2];
-      const blockSize = subnet.inverseMask[2] + 1; // e.g. 2 for /23
-      const adjacentAbove = { ...subnet, networkParts: [...subnet.networkParts] };
-      adjacentAbove.networkParts[2] = thirdOctet + blockSize;
-      if (adjacentAbove.networkParts[2] <= 255) {
-        generateIPsForSubnet(adjacentAbove).forEach(ip => allIPs.add(ip));
-      }
-      const adjacentBelow = { ...subnet, networkParts: [...subnet.networkParts] };
-      adjacentBelow.networkParts[2] = thirdOctet - blockSize;
-      if (adjacentBelow.networkParts[2] >= 0) {
-        generateIPsForSubnet(adjacentBelow).forEach(ip => allIPs.add(ip));
-      }
-    }
   }
 
   const ipList = Array.from(allIPs);
-  dlog('scanner', 'scan-start', `${ipList.length} IPs across ${subnets.length} interfaces + adjacent subnets`);
+  dlog('scanner', 'scan-start', `${ipList.length} IPs across ${subnets.length} interfaces (local subnet)`);
 
   const BATCH_SIZE = 50; // concurrent probes
   let found = 0;
@@ -1300,35 +1314,7 @@ async function scanSubnets() {
     const results = await Promise.all(batch.map(ip => probeDiscoveryPort(ip).then(r => r ? { ip, ...r } : null)));
     for (const r of results) {
       if (!r) continue;
-      found++;
-      const existing = peers.get(r.deviceId);
-      let peerMac = r.mac || null;
-      if (peerMac) peerMac = peerMac.toUpperCase();
-      if (isPeerBlocked(peerMac)) continue;
-
-      if (!existing) {
-        dlog('scanner', 'new-peer', { name: r.deviceName, ip: r.ip, port: r.port, platform: r.platform });
-      }
-
-      peers.set(r.deviceId, {
-        id: r.deviceId,
-        name: r.deviceName || r.ip,
-        host: r.ip,
-        port: r.port,
-        platform: r.platform || 'unknown',
-        addresses: [r.ip],
-        mac: peerMac,
-        lastSeen: Date.now(),
-      });
-
-      // Also save as known peer for fast reconnection
-      knownPeerIPs = knownPeerIPs.filter(k => k.ip !== r.ip);
-      knownPeerIPs.push({ ip: r.ip, port: r.port, lastSeen: Date.now() });
-
-      if (!existing) {
-        const p = peers.get(r.deviceId);
-        if (p) setTimeout(() => syncCatalogFromPeer(p), 1000);
-      }
+      if (processScanResult(r)) found++;
     }
   }
 
@@ -1337,15 +1323,118 @@ async function scanSubnets() {
   dlog('scanner', 'scan-complete', `found ${found} peers from ${ipList.length} IPs`);
 }
 
+// ─── Wide Campus Scan ─────────────────────────────────────────────────────────
+// On college/campus networks, devices can be on completely different /23 VLANs
+// within the same /16 (e.g. 172.17.35.x vs 172.17.61.x).  mDNS and UDP
+// broadcasts never cross VLAN boundaries, and the local subnet scanner only
+// hits the immediate /23 block.
+//
+// The wide scan probes the ENTIRE third-octet range (0–255) on port 41235
+// (the discovery beacon port) with low concurrency so we don't flood the
+// network.  It only sends one probe per /23 block (the .1 address) first,
+// and if that responds, it fans out into the full block.  This keeps the
+// scan lightweight while covering the whole campus.
+// ─────────────────────────────────────────────────────────────────────────────
+
+let wideScanInterval = null;
+let wideScanRunning = false;
+
+async function wideCampusScan() {
+  if (wideScanRunning) return;            // don't overlap scans
+  wideScanRunning = true;
+
+  const subnets = getSubnetsToScan();
+  if (subnets.length === 0) { wideScanRunning = false; return; }
+
+  // We operate on the first two octets of each local interface
+  // e.g.  172.17.x.x  →  scan 172.17.0.1 through 172.17.255.254
+  const prefixes = new Set();
+  const myIPs = new Set();
+  for (const s of subnets) {
+    prefixes.add(`${s.networkParts[0]}.${s.networkParts[1]}`);
+    myIPs.add(s.myIP);
+  }
+
+  let found = 0;
+  const BATCH = 20;   // low concurrency to be network-friendly
+
+  for (const prefix of prefixes) {
+    // Phase 1 — probe one sentinel IP (.1) per /23 block across the whole /16
+    //           This is 128 probes covering all 256 third-octets (even ones: 0,2,4…254)
+    const sentinels = [];
+    for (let thirdOctet = 0; thirdOctet <= 254; thirdOctet += 2) {
+      const ip = `${prefix}.${thirdOctet}.1`;
+      if (!myIPs.has(ip)) sentinels.push(ip);
+    }
+
+    dlog('wide-scan', 'phase1-start', `${sentinels.length} sentinel probes on ${prefix}.x.x`);
+    const liveBlocks = [];   // third-octets where we got a hit
+
+    for (let i = 0; i < sentinels.length; i += BATCH) {
+      const batch = sentinels.slice(i, i + BATCH);
+      const results = await Promise.all(
+        batch.map(ip => probeDiscoveryPort(ip).then(r => r ? { ip, ...r } : null))
+      );
+      for (const r of results) {
+        if (!r) continue;
+        if (processScanResult(r)) found++;
+        // Mark this /23 block as live so phase 2 fills it out
+        const parts = r.ip.split('.').map(Number);
+        const blockStart = parts[2] & 0xFE;  // even-aligned for /23
+        liveBlocks.push(blockStart);
+      }
+    }
+
+    // Phase 2 — for each /23 block where a sentinel responded, scan the full block
+    const phase2IPs = new Set();
+    for (const blockStart of liveBlocks) {
+      for (let c = blockStart; c <= blockStart + 1 && c <= 255; c++) {
+        for (let d = 1; d <= 254; d++) {
+          const ip = `${prefix}.${c}.${d}`;
+          if (!myIPs.has(ip)) phase2IPs.add(ip);
+        }
+      }
+    }
+
+    if (phase2IPs.size > 0) {
+      dlog('wide-scan', 'phase2-start', `${phase2IPs.size} IPs in ${liveBlocks.length} live blocks`);
+      const phase2List = Array.from(phase2IPs);
+      for (let i = 0; i < phase2List.length; i += BATCH) {
+        const batch = phase2List.slice(i, i + BATCH);
+        const results = await Promise.all(
+          batch.map(ip => probeDiscoveryPort(ip).then(r => r ? { ip, ...r } : null))
+        );
+        for (const r of results) {
+          if (!r) continue;
+          if (processScanResult(r)) found++;
+        }
+      }
+    }
+
+    dlog('wide-scan', 'prefix-done', `${prefix}.x.x — found ${found} total`);
+  }
+
+  store.set('knownPeerIPs', knownPeerIPs);
+  if (found > 0) sendToRenderer('peers-updated', getVisiblePeers());
+  dlog('wide-scan', 'complete', `found ${found} peers across campus`);
+  wideScanRunning = false;
+}
+
 function startSubnetScanner() {
-  // First scan after 5 seconds (let the beacon server start first)
+  // First local scan after 5 seconds (let the beacon server start first)
   setTimeout(() => scanSubnets(), 5000);
-  // Then scan every 30 seconds
+  // Then local scan every 30 seconds
   subnetScanInterval = setInterval(() => scanSubnets(), 30000);
+
+  // Wide campus scan: first run after 10 seconds, then every 2 minutes
+  // (slower cadence since it covers much more ground)
+  setTimeout(() => wideCampusScan(), 10000);
+  wideScanInterval = setInterval(() => wideCampusScan(), 120000);
 }
 
 function stopSubnetScanner() {
   if (subnetScanInterval) { clearInterval(subnetScanInterval); subnetScanInterval = null; }
+  if (wideScanInterval) { clearInterval(wideScanInterval); wideScanInterval = null; }
 }
 
 // ─── Manual / Direct Peer Connection ────────────────────────────────────────
@@ -1820,6 +1909,8 @@ function setupIPC() {
       beaconActive: !!discoveryBeaconServer,
       beaconPort: DISCOVERY_PORT,
       scannerActive: !!subnetScanInterval,
+      wideScanActive: !!wideScanInterval,
+      wideScanRunning: wideScanRunning,
       firewallConfigured: firewallConfigured,
       peerCount: peers.size,
       peers: Array.from(peers.values()).map(p => ({ id: p.id.slice(0,8), name: p.name, host: p.host, port: p.port, platform: p.platform, addresses: p.addresses, lastSeen: p.lastSeen })),
