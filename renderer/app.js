@@ -562,7 +562,7 @@ async function showDiagStatus() {
       `UDP Broadcast Port: ${s.udpPort}`,
       `Beacon Server:      ${s.beaconActive ? '✅ Listening on port ' + s.beaconPort : '❌ NOT running'}`,
       `Subnet Scanner:     ${s.scannerActive ? '✅ Active (every 30s)' : '❌ NOT running'}`,
-      `UDP Campus Blaster: ${s.udpBlasterActive ? '✅ Active (every 15s, ~65K unicast beacons)' : '❌ NOT running'}`,
+      `UDP Campus Blaster: ${s.udpBlasterActive ? '✅ Active (every 60s, ~65K unicast beacons)' : '❌ NOT running'}`,
       `Firewall Rules:     ${s.firewallConfigured ? '✅ Applied' : '⚠️ Not applied (Windows only)'}`,
       ``,
       `=== Network Interfaces ===`,
@@ -570,7 +570,7 @@ async function showDiagStatus() {
       ``,
       `=== Discovered Peers (${s.peerCount}) ===`,
       ...s.peers.map(p => `  ${p.name} [${p.platform}] — ${p.addresses.join(', ')}:${p.port} (host: ${p.host}) — seen ${Math.round((Date.now() - p.lastSeen)/1000)}s ago`),
-      s.peerCount === 0 ? '  (none — UDP blaster runs every 15s, peers should appear within seconds)' : '',
+      s.peerCount === 0 ? '  (none — UDP blaster runs at startup + every 60s)' : '',
       ``,
       `Log entries: ${s.logCount}`,
     ];

@@ -634,7 +634,7 @@ function getDiskSpace(dirPath) {
 function probePeer(peer) {
   return new Promise((resolve) => {
     const addr = getPeerAddr(peer);
-    const req = http.get(`http://${addr}:${peer.port}/api/health`, { timeout: 3000 }, (res) => {
+    const req = http.get(`http://${addr}:${peer.port}/api/health`, { timeout: 1500 }, (res) => {
       let body = ''; res.on('data', (d) => body += d);
       res.on('end', () => { try { const d = JSON.parse(body); resolve(d.ok ? d : null); } catch (e) { resolve(null); } });
     });
@@ -971,19 +971,21 @@ function startDiscovery() {
     txt: { id: DEVICE_ID, name: getDisplayName(), platform: process.platform, mac: myMacAddress, ip: myIP }
   });
   startBrowsing();
-  discoveryInterval = setInterval(() => { stopBrowsing(); startBrowsing(); }, 10000);
+  discoveryInterval = setInterval(() => { stopBrowsing(); startBrowsing(); }, 60000);
   staleCleanupInterval = setInterval(async () => {
     const now = Date.now(); const staleIds = [];
     for (const [id, peer] of peers) if (now - peer.lastSeen > 60000) staleIds.push(id);
-    for (const id of staleIds) {
-      const peer = peers.get(id); if (!peer) continue;
+    if (staleIds.length === 0) return;
+    // Probe all stale peers in parallel (not sequentially) to avoid blocking
+    const results = await Promise.allSettled(staleIds.map(async (id) => {
+      const peer = peers.get(id); if (!peer) return;
       const h = await probePeer(peer);
       if (!h) { peers.delete(id); dlog('stale', 'removed', { id, name: peer.name }); }
       else { peer.lastSeen = Date.now(); if (h.deviceName) peer.name = h.deviceName; }
-    }
+    }));
     sendToRenderer('peers-updated', getVisiblePeers());
     retryInterruptedDownloads();
-  }, 30000);
+  }, 45000);
 
   // Configure Windows firewall (needs actualPort to be set)
   ensureWindowsFirewall();
@@ -1064,8 +1066,8 @@ function startUDPDiscovery() {
       }
     });
 
-    // Send beacon every 5 seconds
-    udpBroadcastInterval = setInterval(() => sendUDPBeacon(), 5000);
+    // Send beacon every 10 seconds
+    udpBroadcastInterval = setInterval(() => sendUDPBeacon(), 10000);
     // Send immediately too
     setTimeout(() => sendUDPBeacon(), 500);
   } catch (e) {
@@ -1256,7 +1258,7 @@ function generateIPsForSubnet(subnet) {
 
 function probeDiscoveryPort(ip) {
   return new Promise((resolve) => {
-    const req = http.get(`http://${ip}:${DISCOVERY_PORT}/ping`, { timeout: 1500 }, (res) => {
+    const req = http.get(`http://${ip}:${DISCOVERY_PORT}/ping`, { timeout: 800 }, (res) => {
       let body = '';
       res.on('data', (d) => body += d);
       res.on('end', () => {
@@ -1319,7 +1321,7 @@ async function scanSubnets() {
   const ipList = Array.from(allIPs);
   dlog('scanner', 'scan-start', `${ipList.length} IPs across ${subnets.length} interfaces (local subnet)`);
 
-  const BATCH_SIZE = 50; // concurrent probes
+  const BATCH_SIZE = 20; // concurrent probes — keep low to avoid overwhelming macOS
   let found = 0;
 
   for (let i = 0; i < ipList.length; i += BATCH_SIZE) {
@@ -1470,17 +1472,23 @@ function startSubnetScanner() {
   subnetScanInterval = setInterval(() => scanSubnets(), 30000);
 
   // Wide campus UDP unicast blaster:
-  // First blast after 3 seconds (fast!), then every 15 seconds.
-  // Each run sends ~65K tiny UDP packets in ~2 seconds — fire and forget.
-  // Any LANDrop peer that receives it will register us immediately.
+  // First blast after 3 seconds for fast initial discovery.
+  // Then every 60 seconds — once a peer is found via UDP, it stays
+  // in the known peers list and gets reprobed directly, so we don't
+  // need to blast the whole /16 frequently.
   setTimeout(() => {
-    sendWideBroadcastBeacons();  // try directed broadcasts first (cheapest)
-    sendWideCampusBeacons();     // then full unicast sweep
+    sendWideBroadcastBeacons();
+    sendWideCampusBeacons();
   }, 3000);
+  // Do a second quick blast at 18 seconds for peers that started slightly later
+  setTimeout(() => {
+    sendWideBroadcastBeacons();
+    sendWideCampusBeacons();
+  }, 18000);
   wideScanInterval = setInterval(() => {
     sendWideBroadcastBeacons();
     sendWideCampusBeacons();
-  }, 15000);
+  }, 60000);
 }
 
 function stopSubnetScanner() {
@@ -1878,14 +1886,19 @@ async function performSwarmDownload({ sources, fileName, fileSize, fileHash }) {
 function setupIPC() {
   ipcMain.handle('get-peers', () => getVisiblePeers());
   ipcMain.handle('refresh-discovery', async () => {
-    // Probe all existing peers — remove any that don't respond
-    const deadIds = [];
-    for (const [id, peer] of peers) {
-      const alive = await probePeer(peer);
-      if (!alive) deadIds.push(id);
-      else { peer.lastSeen = Date.now(); if (alive.deviceName) peer.name = alive.deviceName; }
+    // Probe all existing peers in parallel — remove any that don't respond
+    const probeResults = await Promise.allSettled(
+      Array.from(peers.entries()).map(async ([id, peer]) => {
+        const alive = await probePeer(peer);
+        return { id, alive };
+      })
+    );
+    for (const result of probeResults) {
+      if (result.status !== 'fulfilled') continue;
+      const { id, alive } = result.value;
+      if (!alive) peers.delete(id);
+      else { const p = peers.get(id); if (p) { p.lastSeen = Date.now(); if (alive.deviceName) p.name = alive.deviceName; } }
     }
-    for (const id of deadIds) peers.delete(id);
     // Restart mDNS browser to discover new peers
     stopBrowsing();
     startBrowsing();
