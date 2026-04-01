@@ -485,36 +485,47 @@ function getMyMacAddress() {
   return '00:00:00:00:00:00';
 }
 
+// ── MAC address lookup with cache (avoids blocking execFileSync on every call) ──
+const macCache = new Map(); // ip -> { mac, ts }
+const MAC_CACHE_TTL = 60000; // 1 minute
+
 function getMacForIP(ip) {
   if (!ip || ip === '127.0.0.1' || ip === '::1') return null;
+  // Return from cache if fresh
+  const cached = macCache.get(ip);
+  if (cached && Date.now() - cached.ts < MAC_CACHE_TTL) return cached.mac;
+  // Don't block — return null and let the async version populate the cache
+  // Kick off async lookup in the background
+  getMacForIPAsync(ip);
+  return cached ? cached.mac : null; // return stale cache if available, else null
+}
+
+function getMacForIPAsync(ip) {
+  if (!ip || ip === '127.0.0.1' || ip === '::1') return;
+  const args = process.platform === 'win32' ? ['-a', ip] : ['-n', ip];
+  const cmd = 'arp';
   try {
-    let output;
-    if (process.platform === 'win32') {
-      // Windows: arp -a <ip>
-      output = execFileSync('arp', ['-a', ip], { encoding: 'utf8', timeout: 3000, windowsHide: true });
-      // Windows format: "  192.168.1.5     aa-bb-cc-dd-ee-ff     dynamic"
-      const match = output.match(/([0-9a-f]{2}[:-]){5}[0-9a-f]{2}/i);
-      if (match) return match[0].replace(/-/g, ':').toUpperCase();
-    } else if (process.platform === 'darwin') {
-      // macOS: arp -n <ip> — note: macOS arp may omit leading zeros
-      output = execFileSync('arp', ['-n', ip], { encoding: 'utf8', timeout: 3000 });
-      const match = output.match(/([0-9a-f]{1,2}:){5}[0-9a-f]{1,2}/i);
-      if (match) return match[0].split(':').map(b => b.padStart(2, '0')).join(':').toUpperCase();
-    } else {
-      // Linux: arp -n <ip> or ip neigh show <ip>
-      try {
-        output = execFileSync('arp', ['-n', ip], { encoding: 'utf8', timeout: 3000 });
-      } catch (e) {
-        // Some Linux distros don't have arp, use ip neigh instead
-        output = execFileSync('ip', ['neigh', 'show', ip], { encoding: 'utf8', timeout: 3000 });
+    execFile(cmd, args, { encoding: 'utf8', timeout: 2000, windowsHide: true }, (err, stdout) => {
+      if (err || !stdout) {
+        macCache.set(ip, { mac: null, ts: Date.now() });
+        return;
       }
-      const match = output.match(/([0-9a-f]{2}:){5}[0-9a-f]{2}/i);
-      if (match) return match[0].toUpperCase();
-    }
+      let mac = null;
+      if (process.platform === 'win32') {
+        const match = stdout.match(/([0-9a-f]{2}[:-]){5}[0-9a-f]{2}/i);
+        if (match) mac = match[0].replace(/-/g, ':').toUpperCase();
+      } else if (process.platform === 'darwin') {
+        const match = stdout.match(/([0-9a-f]{1,2}:){5}[0-9a-f]{1,2}/i);
+        if (match) mac = match[0].split(':').map(b => b.padStart(2, '0')).join(':').toUpperCase();
+      } else {
+        const match = stdout.match(/([0-9a-f]{2}:){5}[0-9a-f]{2}/i);
+        if (match) mac = match[0].toUpperCase();
+      }
+      macCache.set(ip, { mac, ts: Date.now() });
+    });
   } catch (e) {
-    // arp command failed — peer might not be in ARP cache yet, or command doesn't exist
+    macCache.set(ip, { mac: null, ts: Date.now() });
   }
-  return null;
 }
 
 function isPeerBlocked(mac) { return mac ? !!blockedMACs[mac.toUpperCase()] : false; }
@@ -639,6 +650,8 @@ function createServer() {
 
   // Block middleware
   expressApp.use((req, res, next) => {
+    // Skip MAC lookup entirely if no peers are blocked (common case)
+    if (Object.keys(blockedMACs).length === 0) return next();
     const clientIP = req.ip.replace(/^::ffff:/, '');
     const clientMac = getMacForIP(clientIP);
     if (clientMac && isPeerBlocked(clientMac)) return res.status(403).json({ error: 'Blocked' });
