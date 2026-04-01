@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LANDrop</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Registration overlay (first launch only) -->
+  <div class="registration-overlay" id="registration-overlay">
+    <div class="reg-container">
+      <div class="reg-card">
+        <div style="text-align:center;margin-bottom:28px;">
+          <div style="font-size:36px;margin-bottom:8px;color:var(--accent-bright);">&#9672;</div>
+          <h1 style="font-size:24px;font-weight:700;margin-bottom:4px;">Welcome to LANDrop</h1>
+          <p style="color:var(--text-muted);font-size:14px;">Set up your profile to get started</p>
+        </div>
+        <div style="text-align:left;margin-bottom:16px;">
+          <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:6px;">Your name <span style="color:var(--orange);font-size:10px;margin-left:4px;">Cannot be changed later</span></label>
+          <input type="text" id="reg-name-input" class="settings-input" placeholder="e.g. Mridul Harsh" style="width:100%;">
+        </div>
+        <div style="text-align:left;margin-bottom:20px;">
+          <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:6px;">Choose a username (visible to peers on the network)</label>
+          <input type="text" id="reg-username" class="settings-input" placeholder="e.g. mridul_harsh" style="width:100%;">
+        </div>
+        <button class="btn btn-primary" id="reg-submit-btn" style="width:100%;justify-content:center;padding:12px;font-size:15px;">Get Started</button>
+        <p id="reg-error" style="color:var(--red);font-size:12px;margin-top:8px;display:none;"></p>
+        <p style="color:var(--text-muted);font-size:11px;margin-top:14px;line-height:1.6;text-align:center;">No internet required. Your info is stored locally on this device only.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Titlebar -->
+  <div class="titlebar" id="titlebar">
+    <div class="titlebar-drag">
+      <span class="titlebar-logo">&#9672; LANDrop</span>
+    </div>
+  </div>
+
+  <!-- Main Layout -->
+  <div class="app-container">
+    <nav class="sidebar" id="sidebar">
+      <div class="sidebar-section">
+        <div class="nav-item active" data-view="peers" id="nav-peers">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span>Peers</span>
+          <span class="badge" id="peer-count">0</span>
+        </div>
+        <div class="nav-item" data-view="search" id="nav-search">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          <span>Search</span>
+        </div>
+        <div class="nav-item" data-view="transfers" id="nav-transfers">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>Transfers</span>
+          <span class="badge hidden" id="transfer-count">0</span>
+        </div>
+        <div class="nav-item" data-view="myfiles" id="nav-myfiles">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <span>My Files</span>
+        </div>
+        <div class="nav-item" data-view="chat" id="nav-chat">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <span>Chat</span>
+          <span class="badge hidden" id="chat-badge">0</span>
+        </div>
+      </div>
+      <div class="sidebar-footer">
+        <div class="nav-item" data-view="profile" id="nav-profile">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          <span>Profile</span>
+        </div>
+        <div class="nav-item" data-view="bugreport" id="nav-bugreport">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 2v6h6"/><path d="M20 22v-6h-6"/><path d="M22 11.5A10 10 0 0 0 3.2 7.2"/><path d="M2 12.5a10 10 0 0 0 18.8 4.3"/></svg>
+          <span>Report Bug</span>
+        </div>
+        <div class="nav-item" data-view="settings" id="nav-settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Settings</span>
+        </div>
+        <div class="device-info" id="device-info">
+          <div class="device-dot"></div>
+          <span id="my-device-name">Loading...</span>
+        </div>
+      </div>
+    </nav>
+
+    <main class="content" id="content">
+
+      <!-- PEERS VIEW -->
+      <section class="view active" id="view-peers">
+        <div class="view-header">
+          <div><h1>Network Peers</h1><p class="subtitle">Devices sharing on your local network</p></div>
+          <div class="header-actions">
+            <button class="btn btn-ghost" id="btn-refresh-peers">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              Refresh
+            </button>
+          </div>
+        </div>
+        <div class="peers-grid" id="peers-grid">
+          <div class="empty-state"><div class="empty-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></div><h3>Scanning Network...</h3><p>LANDrop is looking for other devices on your LAN.</p><div class="scan-pulse"></div></div>
+        </div>
+      </section>
+
+      <!-- SEARCH VIEW -->
+      <section class="view" id="view-search">
+        <div class="view-header"><div><h1>Search Files</h1><p class="subtitle">Find files across all connected peers</p></div></div>
+        <div class="search-box">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          <input type="text" id="search-input" placeholder="Search for files, movies, music, documents...">
+          <kbd>&#8984;K</kbd>
+        </div>
+        <div id="search-results" class="file-list"><div class="empty-state"><h3>Type to search</h3><p>Search across all indexed files on the network</p></div></div>
+      </section>
+
+      <!-- TRANSFERS VIEW -->
+      <section class="view" id="view-transfers">
+        <div class="view-header"><div><h1>Transfers</h1><p class="subtitle">Active and completed file transfers</p></div></div>
+        <div id="transfers-list" class="transfers-list"><div class="empty-state"><h3>No transfers yet</h3><p>Download or send files to see them here</p></div></div>
+      </section>
+
+      <!-- MY FILES VIEW -->
+      <section class="view" id="view-myfiles">
+        <div class="view-header">
+          <div><h1>My Shared Files</h1><p class="subtitle">Files you're sharing on the network</p></div>
+          <div class="header-actions"><button class="btn btn-primary" id="btn-add-folder"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> Add Folder</button></div>
+        </div>
+        <div id="shared-folders-list" class="shared-folders-list"></div>
+        <div id="my-files-list" class="file-list"></div>
+      </section>
+
+      <!-- PEER BROWSE VIEW -->
+      <section class="view" id="view-peer-browse">
+        <div class="view-header">
+          <div><h1 id="browse-peer-name">Peer Files</h1><p class="subtitle" id="browse-peer-info"></p></div>
+          <div class="header-actions">
+            <button class="btn btn-ghost" id="btn-browse-back"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg> Back</button>
+            <div class="search-mini"><input type="text" id="peer-search-input" placeholder="Filter files..."></div>
+          </div>
+        </div>
+        <div id="peer-files-list" class="file-list"></div>
+      </section>
+
+      <!-- CHAT CONVERSATIONS VIEW -->
+      <section class="view" id="view-chat">
+        <div class="view-header">
+          <div><h1>Chat</h1><p class="subtitle">Messages with peers on the network</p></div>
+          <div class="header-actions"><button class="btn btn-primary btn-sm" id="btn-global-chat"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg> Global Chat</button></div>
+        </div>
+        <div id="chat-convo-list" class="transfers-list"><div class="empty-state"><h3>No conversations yet</h3><p>Start a chat from the Peers tab or use Global Chat</p></div></div>
+      </section>
+
+      <!-- ACTIVE CHAT VIEW -->
+      <section class="view" id="view-chatroom">
+        <div class="view-header" style="border-bottom:1px solid var(--border);margin-bottom:0;padding-bottom:16px;">
+          <div style="display:flex;align-items:center;gap:12px;">
+            <button class="btn btn-ghost btn-sm" id="btn-chat-back" style="padding:6px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
+            <div><h1 id="chatroom-name" style="font-size:18px;">Chat</h1><p class="subtitle" id="chatroom-status"></p></div>
+          </div>
+        </div>
+        <div id="chatroom-messages" style="flex:1;overflow-y:auto;padding:16px 0;display:flex;flex-direction:column;gap:4px;min-height:300px;max-height:calc(100vh - 280px);"></div>
+        <div style="display:flex;gap:8px;padding-top:12px;border-top:1px solid var(--border);">
+          <input type="text" id="chatroom-input" class="settings-input" placeholder="Type a message..." style="flex:1;">
+          <button class="btn btn-primary" id="btn-chat-send"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
+        </div>
+      </section>
+
+      <!-- PROFILE VIEW -->
+      <section class="view" id="view-profile">
+        <div class="view-header"><div><h1>Profile</h1><p class="subtitle">Your account details</p></div></div>
+        <div class="settings-grid" style="max-width:560px;">
+          <div class="settings-card" style="grid-column:1/-1;">
+            <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;">
+              <div id="profile-avatar" style="width:56px;height:56px;border-radius:14px;background:linear-gradient(135deg,#6c5ce7,#00d2a0);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;color:white;flex-shrink:0;"></div>
+              <div><div style="font-size:18px;font-weight:600;" id="profile-name">-</div><div style="font-size:13px;color:var(--text-muted);font-family:var(--font-mono);" id="profile-username-display">-</div></div>
+            </div>
+            <div style="border-top:1px solid var(--border);padding-top:16px;">
+              <div class="info-row"><span>Name</span><code id="profile-name-code">-</code></div>
+              <div class="info-row" style="border-bottom:none;padding-bottom:0;">
+                <span>Username</span>
+                <div style="display:flex;gap:6px;align-items:center;">
+                  <input type="text" id="profile-username-input" class="settings-input" style="width:160px;padding:4px 10px;font-size:13px;">
+                  <button class="btn btn-primary btn-sm" id="btn-save-username">Save</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SETTINGS VIEW -->
+      <section class="view" id="view-settings">
+        <div class="view-header"><div><h1>Settings</h1><p class="subtitle">Configure LANDrop</p></div></div>
+        <div class="settings-grid">
+          <div class="settings-card">
+            <h3>Download Location</h3><p>Where received files are saved</p>
+            <div class="settings-row">
+              <span class="path-display" id="download-path-display">~/Downloads/LANDrop</span>
+              <button class="btn btn-ghost" id="btn-change-dl-path">Change</button>
+            </div>
+          </div>
+          <div class="settings-card">
+            <h3>Shared Folders</h3><p>Folders visible to peers on the network</p>
+            <div id="settings-shared-folders"></div>
+            <button class="btn btn-ghost" id="btn-settings-add-folder" style="margin-top:12px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> Add Folder</button>
+          </div>
+          <div class="settings-card">
+            <h3>Network Info</h3><p>Your connection details</p>
+            <div class="info-row"><span>Device ID</span><code id="info-device-id">-</code></div>
+            <div class="info-row"><span>IP Address</span><code id="info-ip">-</code></div>
+            <div class="info-row"><span>Port</span><code id="info-port">-</code></div>
+            <div class="info-row"><span>Platform</span><code id="info-platform">-</code></div>
+          </div>
+          <div class="settings-card">
+            <h3>Blocked Peers</h3><p>Blocked by MAC address - persists across reconnections</p>
+            <div id="settings-blocked-peers"></div>
+          </div>
+          <div class="settings-card" style="grid-column:1/-1;">
+            <h3>Connect to Peer</h3><p>Can't see a peer? Enter their IP and port directly (find these in their Settings → Network Info)</p>
+            <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+              <div style="flex:1;min-width:160px;">
+                <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px;">IP Address</label>
+                <input type="text" id="manual-peer-ip" placeholder="e.g. 172.17.36.130" style="width:100%;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-primary);font-family:var(--font-mono);font-size:13px;">
+              </div>
+              <div style="width:100px;">
+                <label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:4px;">Port</label>
+                <input type="text" id="manual-peer-port" placeholder="e.g. 5968" style="width:100%;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-elevated);color:var(--text-primary);font-family:var(--font-mono);font-size:13px;">
+              </div>
+              <button class="btn btn-primary" id="btn-connect-peer" style="height:38px;">Connect</button>
+            </div>
+            <div id="manual-connect-result" style="margin-top:8px;font-size:13px;"></div>
+            <div id="known-peers-list" style="margin-top:12px;"></div>
+          </div>
+          <div class="settings-card" style="grid-column:1/-1;">
+            <h3>Discovery Diagnostics</h3><p>Debug cross-platform peer discovery issues</p>
+            <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+              <button class="btn btn-ghost" id="btn-diag-refresh">Refresh Status</button>
+              <button class="btn btn-ghost" id="btn-diag-log">Show Log</button>
+              <button class="btn btn-ghost" id="btn-diag-reset-fw">Re-apply Firewall Rules (Windows)</button>
+            </div>
+            <div id="diag-status" style="font-family:var(--font-mono);font-size:12px;background:var(--bg-elevated);border-radius:8px;padding:14px;white-space:pre-wrap;max-height:400px;overflow-y:auto;color:var(--text-secondary);display:none;"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- BUG REPORT VIEW -->
+      <section class="view" id="view-bugreport">
+        <div class="view-header"><div><h1>Report a Bug</h1><p class="subtitle">Found something broken? Let us know</p></div></div>
+        <div class="settings-grid" style="max-width:640px;">
+          <div class="settings-card" style="grid-column:1/-1;">
+            <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;">
+              <div style="width:56px;height:56px;border-radius:14px;background:linear-gradient(135deg,#6c5ce7,#00d2a0);display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
+              <div><div style="font-size:18px;font-weight:600;margin-bottom:2px;">Mridul Harsh</div><div style="font-size:13px;color:var(--text-muted);">Creator and Developer</div></div>
+            </div>
+            <div style="border-top:1px solid var(--border);padding-top:16px;">
+              <p style="color:var(--text-secondary);font-size:14px;line-height:1.7;margin-bottom:20px;">If you have found a bug, have a feature request, or need help getting LANDrop working on your network, reach out via email.</p>
+              <div style="background:var(--bg-elevated);border-radius:10px;padding:16px 20px;margin-bottom:16px;">
+                <div style="display:flex;align-items:center;gap:12px;">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent-bright)" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                  <div>
+                    <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;">Email</div>
+                    <div style="color:var(--accent-bright);font-family:var(--font-mono);font-size:14px;">f20230844@pilani.bits-pilani.ac.in</div>
+                  </div>
+                </div>
+              </div>
+              <button class="btn btn-primary" id="btn-send-bugreport" style="width:100%;justify-content:center;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg> Send Bug Report Email</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Active transfer bar -->
+  <div class="active-transfer-bar hidden" id="active-transfer-bar">
+    <div class="atb-inner" id="atb-inner"></div>
+  </div>
+
+  <!-- Toast container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <!-- Send modal -->
+  <div class="modal-overlay hidden" id="send-modal">
+    <div class="modal">
+      <h2>Send Files</h2>
+      <p>Select files and a recipient</p>
+      <div id="send-file-list" class="send-file-list"></div>
+      <div id="send-peer-select" class="send-peer-select"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="btn-send-cancel">Cancel</button>
+        <button class="btn btn-primary" id="btn-send-confirm">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Incoming transfer request modal -->
+  <div class="modal-overlay hidden" id="incoming-modal">
+    <div class="modal">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;">
+        <div style="width:48px;height:48px;border-radius:12px;background:rgba(52,152,255,0.15);display:flex;align-items:center;justify-content:center;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#3498ff" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></div>
+        <div><h2 style="margin:0;font-size:18px;">Incoming File</h2><p style="margin:0;color:var(--text-muted);font-size:13px;" id="incoming-sender">From unknown</p></div>
+      </div>
+      <div id="incoming-file-info" style="background:var(--bg-elevated);border-radius:8px;padding:14px 16px;margin-bottom:16px;"></div>
+      <div id="incoming-timer" style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:12px;font-family:var(--font-mono);"></div>
+      <div class="modal-actions">
+        <button class="btn btn-danger" id="btn-incoming-decline">Decline</button>
+        <button class="btn btn-green" id="btn-incoming-accept">Accept</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
