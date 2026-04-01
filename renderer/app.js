@@ -701,7 +701,8 @@ async function completeRegistration() {
     document.getElementById('registration-overlay').style.display = 'none';
     document.getElementById('my-device-name').textContent = username;
     showToast(`Welcome, ${name}!`, 'success');
-    await initApp();
+    // Don't await — let discovery happen in background so UI doesn't hang
+    initApp().catch(e => console.error('Init after registration:', e));
   } catch (e) {
     errEl.textContent = 'Registration failed: ' + (e.message || 'Unknown error');
     errEl.style.display = 'block';
