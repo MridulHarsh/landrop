@@ -1341,15 +1341,14 @@ async function scanSubnets() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 let wideScanInterval = null;
+let wideScanRunning = false;
 
-function sendWideCampusBeacons() {
-  if (!udpSocket) {
-    dlog('wide-scan', 'skip', 'UDP socket not ready');
-    return;
-  }
+async function sendWideCampusBeacons() {
+  if (!udpSocket || wideScanRunning) return;
+  wideScanRunning = true;
 
   const subnets = getSubnetsToScan();
-  if (subnets.length === 0) return;
+  if (subnets.length === 0) { wideScanRunning = false; return; }
 
   const beacon = JSON.stringify({
     type: 'landrop-beacon',
@@ -1373,11 +1372,13 @@ function sendWideCampusBeacons() {
 
   let sent = 0;
   let errors = 0;
+  const BATCH = 200; // send 200 packets then yield to the event loop
 
   for (const prefix of prefixes) {
+    let batchCount = 0;
     for (let c = 0; c <= 255; c++) {
       const blockStart = c & 0xFE;
-      if (myBlocks.has(blockStart)) continue; // local scanner + broadcast already covers this
+      if (myBlocks.has(blockStart)) continue;
 
       for (let d = 1; d <= 254; d++) {
         const ip = `${prefix}.${c}.${d}`;
@@ -1388,16 +1389,24 @@ function sendWideCampusBeacons() {
         } catch (e) {
           errors++;
           if (errors > 100) {
-            // Something is very wrong, bail out
             dlog('wide-scan', 'abort', `too many send errors: ${e.message}`);
+            wideScanRunning = false;
             return;
           }
+        }
+
+        batchCount++;
+        if (batchCount >= BATCH) {
+          batchCount = 0;
+          // Yield to the event loop so IPC, rendering, etc. aren't blocked
+          await new Promise(resolve => setImmediate(resolve));
         }
       }
     }
   }
 
   dlog('wide-scan', 'sent', `${sent} unicast beacons across ${Array.from(prefixes).join(', ')}.x.x (${errors} errors)`);
+  wideScanRunning = false;
 }
 
 // Also send targeted beacons to the broadcast address of every /23 block
