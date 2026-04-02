@@ -837,7 +837,11 @@ function createServer() {
       const decision = await askUserToAcceptTransfer({ filename, fileSize, senderName: senderName || 'Unknown' });
       if (decision.accepted) {
         const token = crypto.randomBytes(24).toString('hex');
-        pendingIncoming.set(token, { filename, fileSize, deviceName: senderName, expires: Date.now() + 120000 });
+        // Create a transfer entry immediately so the receiver sees it in Transfers tab
+        const transferId = uuidv4();
+        pendingIncoming.set(token, { filename, fileSize, deviceName: senderName, expires: Date.now() + 120000, transferId });
+        activeTransfers.set(transferId, { fileName: filename, fileSize, downloaded: 0, status: 'downloading', peerName: senderName || 'Unknown', type: 'incoming-push' });
+        sendToRenderer('transfer-started', { id: transferId, fileName: filename, fileSize, type: 'download', from: senderName || 'Unknown' });
         return res.json({ accepted: true, token });
       } else {
         return res.json({ accepted: false, reason: decision.reason || 'Declined' });
@@ -845,24 +849,85 @@ function createServer() {
     } catch (e) { return res.json({ accepted: false, reason: 'No response' }); }
   });
 
-  const uploadStorage = multer.diskStorage({
-    destination: (req, file, cb) => { const d = path.join(downloadPath, '.tmp'); if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); cb(null, d); },
-    filename: (req, file, cb) => { cb(null, Date.now() + '-' + Math.round(Math.random() * 1E9)); }
-  });
-  const upload = multer({ storage: uploadStorage });
+  // ── Push upload: receive the file with progress tracking ────────────────────
+  // Instead of letting multer handle the upload opaquely (no progress), we
+  // manually stream the multipart body to disk and track bytes received so the
+  // receiver sees live progress in the Transfers tab.
 
-  expressApp.post('/api/push-upload', upload.single('file'), (req, res) => {
+  expressApp.post('/api/push-upload', (req, res) => {
     const token = req.query.token;
-    if (!token || !pendingIncoming.has(token)) { if (req.file) try { fs.unlinkSync(req.file.path); } catch (e) {} return res.status(403).json({ error: 'Invalid token' }); }
+    if (!token || !pendingIncoming.has(token)) return res.status(403).json({ error: 'Invalid token' });
     const pending = pendingIncoming.get(token); pendingIncoming.delete(token);
-    if (Date.now() > pending.expires) { if (req.file) try { fs.unlinkSync(req.file.path); } catch (e) {} return res.status(403).json({ error: 'Token expired' }); }
-    if (!req.file) return res.status(400).json({ error: 'No file' });
-    const destName = req.body.filename || pending.filename || req.file.originalname || 'unknown';
-    const destPath = getUniqueFilename(path.join(downloadPath, destName));
-    fs.renameSync(req.file.path, destPath);
-    let sz = 0; try { sz = fs.statSync(destPath).size; } catch (e) {}
-    sendToRenderer('file-received', { filename: path.basename(destPath), path: destPath, size: sz, from: pending.deviceName || 'Unknown' });
-    res.json({ ok: true, path: destPath });
+    if (Date.now() > pending.expires) {
+      if (pending.transferId) { activeTransfers.delete(pending.transferId); sendToRenderer('transfer-error', { id: pending.transferId, error: 'Token expired' }); }
+      return res.status(403).json({ error: 'Token expired' });
+    }
+
+    const transferId = pending.transferId;
+    const tmpDir = path.join(downloadPath, '.tmp');
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+    const tmpPath = path.join(tmpDir, Date.now() + '-' + Math.round(Math.random() * 1E9));
+    const ws = fs.createWriteStream(tmpPath);
+
+    let received = 0;
+    const totalSize = pending.fileSize || parseInt(req.headers['content-length'], 10) || 0;
+    let lastTime = Date.now();
+    let lastBytes = 0;
+
+    // Track incoming bytes for progress
+    req.on('data', (chunk) => {
+      received += chunk.length;
+      const now = Date.now();
+      const dt = (now - lastTime) / 1000;
+      let speed = 0;
+      if (dt >= 0.5) { speed = (received - lastBytes) / dt; lastBytes = received; lastTime = now; }
+      if (transferId) {
+        const t = activeTransfers.get(transferId);
+        if (t) { t.downloaded = received; t.speed = speed; }
+        // Throttle progress updates to every ~256KB
+        if (received % (256 * 1024) < chunk.length) {
+          const percent = totalSize > 0 ? Math.round((received / totalSize) * 100) : 0;
+          sendToRenderer('transfer-progress', { id: transferId, downloaded: received, total: totalSize, percent, speed });
+        }
+      }
+    });
+
+    // Use multer to parse the multipart body (it writes to tmpPath via our storage)
+    const uploadStorage = multer.diskStorage({
+      destination: (r, file, cb) => cb(null, tmpDir),
+      filename: (r, file, cb) => cb(null, path.basename(tmpPath)),
+    });
+    const singleUpload = multer({ storage: uploadStorage }).single('file');
+
+    singleUpload(req, res, (err) => {
+      if (err) {
+        if (transferId) { activeTransfers.delete(transferId); sendToRenderer('transfer-error', { id: transferId, error: err.message }); }
+        try { ws.close(); fs.unlinkSync(tmpPath); } catch (e) {}
+        return res.status(500).json({ error: err.message });
+      }
+      if (!req.file) {
+        if (transferId) { activeTransfers.delete(transferId); sendToRenderer('transfer-error', { id: transferId, error: 'No file received' }); }
+        return res.status(400).json({ error: 'No file' });
+      }
+
+      const destName = req.body.filename || pending.filename || req.file.originalname || 'unknown';
+      const destPath = getUniqueFilename(path.join(downloadPath, destName));
+      try { fs.renameSync(req.file.path, destPath); } catch (e) {
+        if (transferId) { activeTransfers.delete(transferId); sendToRenderer('transfer-error', { id: transferId, error: `Save failed: ${e.message}` }); }
+        return res.status(500).json({ error: e.message });
+      }
+
+      let sz = 0; try { sz = fs.statSync(destPath).size; } catch (e) {}
+
+      // Mark transfer complete
+      if (transferId) {
+        const t = activeTransfers.get(transferId);
+        if (t) { t.status = 'complete'; t.downloaded = sz; t.path = destPath; }
+        sendToRenderer('transfer-complete', { id: transferId, path: destPath });
+      }
+      sendToRenderer('file-received', { filename: path.basename(destPath), path: destPath, size: sz, from: pending.deviceName || 'Unknown' });
+      res.json({ ok: true, path: destPath });
+    });
   });
 
   setInterval(() => { const now = Date.now(); for (const [t, d] of pendingIncoming) if (now > d.expires) pendingIncoming.delete(t); }, 30000);
@@ -2414,7 +2479,14 @@ function setupIPC() {
   // ── Auto-Update ─────────────────────────────────────────────────────────────
   ipcMain.handle('install-update', () => {
     if (updateInstallerPath && fs.existsSync(updateInstallerPath)) {
-      shell.openPath(updateInstallerPath);
+      // On Windows, shell.openPath doesn't reliably execute .exe installers.
+      // Use shell.openExternal with a file:// URL which properly launches the installer.
+      // On macOS, shell.openPath works fine for .dmg files.
+      if (process.platform === 'win32') {
+        shell.openExternal(`file://${updateInstallerPath.replace(/\\/g, '/')}`);
+      } else {
+        shell.openPath(updateInstallerPath);
+      }
       // Give the installer a moment to start, then quit
       setTimeout(() => { forceQuit = true; isQuitting = true; cleanup(); app.quit(); }, 1500);
       return { ok: true };

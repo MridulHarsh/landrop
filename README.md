@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-blue" alt="Platform">
   <img src="https://img.shields.io/badge/built%20with-Electron-47848f" alt="Electron">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-  <img src="https://img.shields.io/badge/version-1.2.1-orange" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.2.2-orange" alt="Version">
 </p>
 
 ---
@@ -173,10 +173,10 @@ npm run build:all
 ```
 
 Output goes to `dist/`:
-- **macOS** → `LANDrop-1.2.1.dmg`
-- **Windows** → `LANDrop-Setup-1.2.1.exe` (per-user install, no admin required)
+- **macOS** → `LANDrop-1.2.2.dmg`
+- **Windows** → `LANDrop-Setup-1.2.2.exe` (per-user install, no admin required)
 
-Pushing a version tag (e.g. `git push origin v1.2.1`) triggers the GitHub Actions workflow which builds both installers and creates a GitHub Release with the files attached automatically.
+Pushing a version tag (e.g. `git push origin v1.2.2`) triggers the GitHub Actions workflow which builds both installers and creates a GitHub Release with the files attached automatically.
 
 ---
 
@@ -340,6 +340,10 @@ LANDrop is designed to work on typical college/office networks:
 
 ## Changelog
 
+### v1.2.2
+- **Fixed auto-updater on Windows** — `shell.openPath()` doesn't reliably execute `.exe` installers on Windows; now uses `shell.openExternal()` with a `file://` URL which properly launches the NSIS installer
+- **Receiver now sees incoming push transfers in Transfers tab** — previously only the sender saw upload progress. Now when a peer sends you a file, you see it appear in your Transfers tab immediately after accepting, with a live progress bar, speed indicator, and completion status — just like downloads
+
 ### v1.2.1
 - **Mutual discovery handshake** — when an existing peer receives a beacon from a new unknown peer, it immediately sends a unicast reply back so the new peer discovers it too. Fixes the issue where newly connected peers couldn't see already-online peers across VLANs.
 
@@ -379,6 +383,8 @@ Hard-won lessons from building this on a real college LAN:
 - **Peer liveness must be actively probed** — relying on mDNS browser restarts leaves stale peers visible; use HTTP health checks.
 - **Throttle IPC to the renderer** — sending `peers-updated` on every UDP beacon received can flood Electron's IPC and freeze the UI. Batch updates with a timer.
 - **GitHub Release assets ≠ workflow artifacts** — `actions/upload-artifact` stores files internally for the workflow, but the auto-updater needs files attached to a GitHub Release via `softprops/action-gh-release`. These are two different systems.
+- **`shell.openPath` vs `shell.openExternal` on Windows** — `openPath` opens a file with its default handler, which for `.exe` may show properties instead of executing. Use `openExternal` with `file://` to reliably launch executables.
+- **Multer eats progress on incoming uploads** — by default, multer buffers the entire multipart upload before calling the handler, so you can't track bytes received. Hooking into the `req` `data` event before passing to multer gives you streaming progress.
 
 ---
 
