@@ -95,6 +95,49 @@ document.addEventListener('DOMContentLoaded', async () => {
   on('btn-incoming-decline', 'click', () => declineIncoming());
   on('btn-incoming-accept', 'click', () => acceptIncoming());
 
+  // ── Global event delegation for dynamically generated buttons ──────────────
+  // Instead of inline onclick="..." (blocked by Electron CSP), all dynamic
+  // buttons use data-action="..." attributes. This single handler routes them.
+  document.body.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+
+    if (action === 'remove-folder') {
+      removeSharedFolder(btn.dataset.folder);
+    } else if (action === 'download-file') {
+      downloadFile(btn.dataset.peer, btn.dataset.path, btn.dataset.name, Number(btn.dataset.size), btn.dataset.hash || null);
+    } else if (action === 'download-folder') {
+      downloadFolder(btn.dataset.peer, btn.dataset.folder);
+    } else if (action === 'open-file') {
+      window.landrop.openFile(btn.dataset.path);
+    } else if (action === 'open-chat') {
+      e.stopPropagation();
+      openChatWith(btn.dataset.peer, btn.dataset.name);
+    } else if (action === 'browse-peer') {
+      browsePeer(btn.dataset.peer);
+    } else if (action === 'send-to-peer') {
+      openSendModal(btn.dataset.peer);
+    } else if (action === 'chat-with-peer') {
+      openChatWith(btn.dataset.peer, btn.dataset.name);
+    } else if (action === 'unblock-peer') {
+      unblockPeer(btn.dataset.mac);
+    } else if (action === 'block-peer') {
+      e.stopPropagation();
+      blockPeer(btn.dataset.peer, btn.dataset.name);
+    } else if (action === 'delete-chat') {
+      e.stopPropagation();
+      deleteChat(btn.dataset.peer, btn.dataset.name);
+    } else if (action === 'select-send-peer') {
+      selectSendPeer(btn.dataset.peer);
+    } else if (action === 'open-folder') {
+      e.preventDefault();
+      window.landrop.openFolder(btn.dataset.path);
+    } else if (action === 'remove-known-peer') {
+      removeKnownPeer(btn.dataset.ip);
+    }
+  });
+
   // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -336,27 +379,27 @@ function renderPeers() {
     const ip = peer.addresses?.find(a => !a.includes(':')) || peer.host || '—';
 
     return `
-      <div class="peer-card" ondblclick="browsePeer('${peer.id}')">
+      <div class="peer-card">
         <div class="peer-card-header">
           <div class="peer-avatar ${platformClass}">${platformIcon}</div>
           <div style="flex:1;min-width:0;">
             <div class="peer-name">${escapeHtml(peer.name)}</div>
             <div class="peer-meta">${ip} · ${platformLabel}</div>
           </div>
-          <button class="btn btn-danger btn-sm" onclick="event.stopPropagation();blockPeer('${peer.id}','${escapeJs(peer.name)}')" title="Block this peer" style="padding:5px 8px;">
+          <button class="btn btn-danger btn-sm" data-action="block-peer" data-peer="${escapeHtml(peer.id)}" data-name="${escapeHtml(peer.name)}" title="Block this peer" style="padding:5px 8px;">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
           </button>
         </div>
         <div class="peer-actions">
-          <button class="btn btn-ghost btn-sm" onclick="browsePeer('${peer.id}')">
+          <button class="btn btn-ghost btn-sm" data-action="browse-peer" data-peer="${escapeHtml(peer.id)}">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
             Browse
           </button>
-          <button class="btn btn-ghost btn-sm" onclick="openChatWith('${peer.id}','${escapeJs(peer.name)}')" style="color:var(--accent-bright);">
+          <button class="btn btn-ghost btn-sm" data-action="chat-with-peer" data-peer="${escapeHtml(peer.id)}" data-name="${escapeHtml(peer.name)}" style="color:var(--accent-bright);">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             Chat
           </button>
-          <button class="btn btn-green btn-sm" onclick="openSendModal('${peer.id}')">
+          <button class="btn btn-green btn-sm" data-action="send-to-peer" data-peer="${escapeHtml(peer.id)}">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             Send
           </button>
@@ -395,12 +438,37 @@ function renderPeerFiles(files) {
     return;
   }
 
-  list.innerHTML = `
-    <div class="file-list-header">
-      <span></span><span>Name</span><span></span><span>Size</span><span></span>
-    </div>
-    ${files.map(f => fileRow(f, currentBrowsePeerId)).join('')}
-  `;
+  // Group files by their top-level shared folder
+  const folderGroups = new Map();
+  for (const f of files) {
+    const folderName = f.folder || 'Files';
+    if (!folderGroups.has(folderName)) folderGroups.set(folderName, []);
+    folderGroups.get(folderName).push(f);
+  }
+
+  let html = '';
+  for (const [folderName, folderFiles] of folderGroups) {
+    const totalSize = folderFiles.reduce((sum, f) => sum + (f.size || 0), 0);
+    html += `
+      <div class="folder-group">
+        <div class="folder-group-header">
+          <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent-bright)" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            <span style="font-weight:600;font-size:14px;">${escapeHtml(folderName)}</span>
+            <span style="font-size:12px;color:var(--text-muted);font-family:var(--font-mono);">${folderFiles.length} files · ${formatBytes(totalSize)}</span>
+          </div>
+          <button class="btn btn-primary btn-sm" data-action="download-folder" data-peer="${escapeHtml(currentBrowsePeerId)}" data-folder="${escapeHtml(folderName)}" title="Download entire folder">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Folder
+          </button>
+        </div>
+        <div class="file-list-header">
+          <span></span><span>Name</span><span></span><span>Size</span><span></span>
+        </div>
+        ${folderFiles.map(f => fileRow(f, currentBrowsePeerId)).join('')}
+      </div>`;
+  }
+  list.innerHTML = html;
 }
 
 function filterPeerFiles(query) {
@@ -457,7 +525,7 @@ function renderSearchResult(r) {
   // Peer list
   const peerList = r.peers.map(p => {
     const dot = p.isOnline ? onlineDot : offlineDot;
-    const msgBtn = p.isOnline ? `<button onclick="event.stopPropagation();openChatWith('${escapeJs(p.peerId)}','${escapeJs(p.peerName)}')" style="background:none;border:none;cursor:pointer;color:var(--accent-bright);padding:1px 4px;font-size:11px;vertical-align:middle;" title="Message ${escapeHtml(p.peerName)}">
+    const msgBtn = p.isOnline ? `<button data-action="open-chat" data-peer="${escapeHtml(p.peerId)}" data-name="${escapeHtml(p.peerName)}" style="background:none;border:none;cursor:pointer;color:var(--accent-bright);padding:1px 4px;font-size:11px;vertical-align:middle;" title="Message ${escapeHtml(p.peerName)}">
       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
     </button>` : '';
     return `<span style="display:inline-flex;align-items:center;gap:2px;font-size:11px;color:${p.isOnline ? 'var(--text-secondary)' : 'var(--text-muted)'};margin-right:8px;white-space:nowrap;">${dot}${escapeHtml(p.peerName)}${msgBtn}</span>`;
@@ -465,7 +533,7 @@ function renderSearchResult(r) {
 
   // Download button — only enabled if at least one peer is online
   const downloadBtn = r.isAvailable
-    ? `<button class="btn btn-primary btn-sm" onclick="downloadFile('${escapeJs(r.peerId)}','${escapeJs(r.filePath)}','${escapeJs(r.name)}',${r.size}${r.hash ? `,'${escapeJs(r.hash)}'` : ',null'})">
+    ? `<button class="btn btn-primary btn-sm" data-action="download-file" data-peer="${escapeHtml(r.peerId)}" data-path="${escapeHtml(r.filePath)}" data-name="${escapeHtml(r.name)}" data-size="${r.size}" data-hash="${escapeHtml(r.hash || '')}">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       </button>`
     : `<button class="btn btn-ghost btn-sm" disabled style="opacity:0.4;" title="All peers offline">
@@ -505,7 +573,7 @@ async function loadMyFiles() {
       <div class="shared-folder-chip">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         ${escapeHtml(f)}
-        <button class="remove-btn" onclick="removeSharedFolder('${escapeHtml(f)}')">
+        <button class="remove-btn" data-action="remove-folder" data-folder="${escapeHtml(f)}">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
@@ -576,7 +644,7 @@ async function loadKnownPeers() {
         <div class="shared-folder-chip" style="margin-bottom:4px;">
           <code style="font-size:12px;">${escapeHtml(k.ip)}:${k.port}</code>
           <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">last seen ${new Date(k.lastSeen).toLocaleDateString()}</span>
-          <button class="remove-btn" onclick="removeKnownPeer('${escapeHtml(k.ip)}')">
+          <button class="remove-btn" data-action="remove-known-peer" data-ip="${escapeHtml(k.ip)}">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>`).join('');
@@ -655,6 +723,7 @@ async function showDiagLog() {
 async function loadSettings() {
   const info = await window.landrop.getDeviceInfo();
   document.getElementById('download-path-display').textContent = info.downloadPath;
+  document.getElementById('info-version').textContent = 'v' + (info.version || '?');
   document.getElementById('info-device-id').textContent = info.id.slice(0, 12) + '...';
   document.getElementById('info-ip').textContent = info.ip;
   document.getElementById('info-port').textContent = info.port;
@@ -666,7 +735,7 @@ async function loadSettings() {
     <div class="shared-folder-chip" style="margin-bottom:6px">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
       ${escapeHtml(f)}
-      <button class="remove-btn" onclick="removeSharedFolder('${escapeHtml(f)}')">
+      <button class="remove-btn" data-action="remove-folder" data-folder="${escapeHtml(f)}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
@@ -690,7 +759,7 @@ async function loadSettings() {
               <div style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);">${escapeHtml(b.mac)}${platformLabel ? ' · ' + platformLabel : ''}${dateStr ? ' · blocked ' + dateStr : ''}</div>
             </div>
           </div>
-          <button class="btn btn-ghost btn-sm" onclick="unblockPeer('${escapeJs(b.mac)}','${escapeJs(b.name)}')" style="flex-shrink:0;">Unblock</button>
+          <button class="btn btn-ghost btn-sm" data-action="unblock-peer" data-mac="${escapeHtml(b.mac)}" style="flex-shrink:0;">Unblock</button>
         </div>`;
     }).join('');
   }
@@ -804,7 +873,7 @@ function renderTransfers() {
 
     let meta = '';
     if (t.status === 'complete') {
-      meta = t.path ? `<a href="#" onclick="window.landrop.openFolder('${escapeJs(t.path)}');return false" style="color:var(--accent-bright)">Show in folder</a>` : 'Complete';
+      meta = t.path ? `<a href="#" data-action="open-folder" data-path="${escapeHtml(t.path)}" style="color:var(--accent-bright)">Show in folder</a>` : 'Complete';
     } else if (isInterrupted) {
       meta = `<span style="color:var(--orange)">Interrupted — will resume automatically</span>`;
     } else if (t.status === 'error') {
@@ -921,6 +990,17 @@ async function downloadFile(peerId, filePath, fileName, fileSize, fileHash) {
   }
 }
 
+async function downloadFolder(peerId, folderName) {
+  switchView('transfers');
+  showToast(`Downloading folder: ${folderName}`, 'info');
+  const result = await window.landrop.downloadFolder({ peerId, folderName });
+  if (result && result.error) {
+    showToast(`Folder download failed: ${result.error}`, 'error');
+  } else if (result) {
+    showToast(`Folder download started: ${result.fileCount} files`, 'info');
+  }
+}
+
 // FIX Issue 3: Send feature completely rewritten.
 //
 // Problems in the original code:
@@ -972,7 +1052,7 @@ async function openSendModal(peerId) {
     // No peer pre-selected — show peer picker
     document.getElementById('send-peer-select').innerHTML = peers.length > 0
       ? peers.map(p => `
-        <div class="send-peer-item" onclick="selectSendPeer('${p.id}', this)">
+        <div class="send-peer-item" data-action="select-send-peer" data-peer="${escapeHtml(p.id)}">
           ${escapeHtml(p.name)}
           <span style="margin-left:auto;color:var(--text-muted);font-size:12px">${p.platform === 'darwin' ? 'macOS' : p.platform === 'win32' ? 'Windows' : 'Linux'}</span>
         </div>`).join('')
@@ -980,10 +1060,9 @@ async function openSendModal(peerId) {
   }
 }
 
-function selectSendPeer(id, el) {
+function selectSendPeer(id) {
   selectedSendPeer = id;
-  document.querySelectorAll('.send-peer-item').forEach(e => e.classList.remove('selected'));
-  el.classList.add('selected');
+  document.querySelectorAll('.send-peer-item').forEach(e => e.classList.toggle('selected', e.dataset.peer === id));
 }
 
 function closeSendModal() {
@@ -1018,7 +1097,6 @@ async function confirmSend() {
 function fileRow(file, peerId, peerName) {
   const ext = (file.name.split('.').pop() || '').toLowerCase();
   const { iconClass, iconLabel } = getFileTypeInfo(ext);
-  const hashParam = file.hash ? `,'${escapeJs(file.hash)}'` : ',null';
 
   return `
     <div class="file-row">
@@ -1027,7 +1105,7 @@ function fileRow(file, peerId, peerName) {
       <div class="file-peer">${peerName ? escapeHtml(peerName) : ''}</div>
       <div class="file-size">${formatBytes(file.size)}</div>
       <div class="file-actions">
-        <button class="btn btn-primary btn-sm" onclick="downloadFile('${peerId}','${escapeJs(file.path)}','${escapeJs(file.name)}',${file.size}${hashParam})">
+        <button class="btn btn-primary btn-sm" data-action="download-file" data-peer="${escapeHtml(peerId)}" data-path="${escapeHtml(file.path)}" data-name="${escapeHtml(file.name)}" data-size="${file.size}" data-hash="${escapeHtml(file.hash || '')}">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         </button>
       </div>
@@ -1045,7 +1123,7 @@ function fileRowLocal(file) {
       <div class="file-peer">${escapeHtml(file.folder || '')}</div>
       <div class="file-size">${formatBytes(file.size)}</div>
       <div class="file-actions">
-        <button class="btn btn-ghost btn-sm" onclick="window.landrop.openFile('${escapeJs(file.path)}')">Open</button>
+        <button class="btn btn-ghost btn-sm" data-action="open-file" data-path="${escapeHtml(file.path)}">Open</button>
       </div>
     </div>`;
 }
@@ -1118,7 +1196,7 @@ async function loadConversations() {
     const preview = c.lastMessage.length > 50 ? c.lastMessage.slice(0, 50) + '...' : c.lastMessage;
 
     return `
-      <div class="transfer-item" style="cursor:pointer;position:relative;" onclick="openChatWith('${escapeJs(c.id)}','${escapeJs(c.peerName)}')">
+      <div class="transfer-item" style="cursor:pointer;position:relative;" data-action="chat-with-peer" data-peer="${escapeHtml(c.id)}" data-name="${escapeHtml(c.peerName)}">
         <div style="display:flex;align-items:center;gap:12px;flex:1;min-width:0;">
           ${onlineDot}
           <div style="flex:1;min-width:0;">
@@ -1132,7 +1210,7 @@ async function loadConversations() {
             </div>
           </div>
         </div>
-        <button onclick="event.stopPropagation();deleteChat('${escapeJs(c.id)}','${escapeJs(c.peerName)}')" style="background:none;border:none;cursor:pointer;color:var(--text-muted);padding:4px;border-radius:4px;opacity:0.5;position:absolute;right:8px;top:8px;" title="Delete chat">
+        <button data-action="delete-chat" data-peer="${escapeHtml(c.id)}" data-name="${escapeHtml(c.peerName)}" style="background:none;border:none;cursor:pointer;color:var(--text-muted);padding:4px;border-radius:4px;opacity:0.5;position:absolute;right:8px;top:8px;" title="Delete chat">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
         </button>
       </div>`;

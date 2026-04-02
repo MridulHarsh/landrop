@@ -1,6 +1,6 @@
 {
   "name": "landrop",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Ultra-fast LAN file sharing — a modern DC++ replacement",
   "main": "main.js",
   "scripts": {

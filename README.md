@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-blue" alt="Platform">
   <img src="https://img.shields.io/badge/built%20with-Electron-47848f" alt="Electron">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-  <img src="https://img.shields.io/badge/version-1.2.2-orange" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.2.3-orange" alt="Version">
 </p>
 
 ---
@@ -31,6 +31,7 @@ Unlike DC++, LANDrop requires **no hub server** and **no configuration**. Instal
 ### Core File Sharing
 - **Auto-discovery** — finds peers automatically using mDNS, UDP broadcast, and cross-subnet scanning
 - **Browse & download** — browse any peer's shared folders and download files with one click
+- **Folder download** — download an entire shared folder with one click, preserving subfolder structure (new in v1.2.2)
 - **Push files** — send files directly to a peer with a two-phase consent protocol (they accept before anything transfers)
 - **Resumable downloads** — interrupted downloads pick up where they left off using HTTP range requests
 - **Swarm downloads** — if multiple peers have the same file (verified by SHA-256 hash), LANDrop downloads chunks from all of them simultaneously, like a torrent
@@ -173,10 +174,10 @@ npm run build:all
 ```
 
 Output goes to `dist/`:
-- **macOS** → `LANDrop-1.2.2.dmg`
-- **Windows** → `LANDrop-Setup-1.2.2.exe` (per-user install, no admin required)
+- **macOS** → `LANDrop-1.2.3.dmg`
+- **Windows** → `LANDrop-Setup-1.2.3.exe` (per-user install, no admin required)
 
-Pushing a version tag (e.g. `git push origin v1.2.2`) triggers the GitHub Actions workflow which builds both installers and creates a GitHub Release with the files attached automatically.
+Pushing a version tag (e.g. `git push origin v1.2.3`) triggers the GitHub Actions workflow which builds both installers and creates a GitHub Release with the files attached automatically.
 
 ---
 
@@ -225,6 +226,7 @@ landrop/
 │                             ├── Windows firewall auto-configuration
 │                             ├── Throttled renderer updates (300ms batching)
 │                             ├── Auto-updater (GitHub Releases API + background download)
+│                             ├── Persistent file logger (.logs/latest.log with rotation)
 │                             └── Resumable download persistence
 ├── preload.js              # Secure IPC bridge (contextIsolation)
 ├── renderer/
@@ -336,13 +338,28 @@ LANDrop is designed to work on typical college/office networks:
 - Go to **Settings → Danger Zone → Delete All Data & Reset**
 - This clears all stored data, removes firewall rules (Windows), and restarts the app
 
+**Need diagnostic logs?**
+- Logs are saved to `~/Downloads/LANDrop/.logs/latest.log`
+- Previous sessions are rotated to timestamped filenames (e.g. `2026-04-03T12-30-00.log`)
+- Logs include discovery events, transfer activity, errors, and session metadata
+
 ---
 
 ## Changelog
 
+### v1.2.3
+- **Version number displayed in Settings** — Network Info card now shows the current app version
+- **"Remind me later" for updates** — dismissing the update banner now snoozes it for 1 hour instead of hiding it permanently for the session
+- **Persistent log file** — all diagnostic events, transfers, discovery, and errors are written to `~/Downloads/LANDrop/.logs/latest.log`. Previous sessions are rotated to timestamped filenames (last 10 kept). Includes session header with platform, Node/Electron versions, and device info
+- **Updated uninstaller** — NSIS uninstaller and factory reset now also clean up the `.logs` folder and auto-updater temp files (`landrop-update` in OS temp directory)
+
 ### v1.2.2
+- **Stale peer reconnection fix** — when a peer restarts, they get a new random Express port. Existing peers now detect this port change in incoming beacons and immediately send a unicast reply, ensuring mutual re-discovery without needing a manual refresh
+- **Folder download** — browse a peer's files and download an entire folder with one click. Subfolder structure is preserved locally, and each file is downloaded using the existing resumable download engine
+- **Fixed shared folder removal** — the "remove" button on shared folders was silently broken by Electron CSP blocking inline `onclick` handlers. Migrated all dynamic buttons app-wide to event delegation with `data-action` attributes
 - **Fixed auto-updater on Windows** — `shell.openPath()` doesn't reliably execute `.exe` installers on Windows; now uses `shell.openExternal()` with a `file://` URL which properly launches the NSIS installer
-- **Receiver now sees incoming push transfers in Transfers tab** — previously only the sender saw upload progress. Now when a peer sends you a file, you see it appear in your Transfers tab immediately after accepting, with a live progress bar, speed indicator, and completion status — just like downloads
+- **Receiver now sees incoming push transfers in Transfers tab** — previously only the sender saw upload progress. Now when a peer sends you a file, you see it appear in your Transfers tab immediately after accepting, with a live progress bar, speed indicator, and completion status
+- **Eliminated all inline onclick handlers** — every dynamic button across the entire app (peer cards, file rows, chat list, search results, settings) now uses CSP-safe event delegation
 
 ### v1.2.1
 - **Mutual discovery handshake** — when an existing peer receives a beacon from a new unknown peer, it immediately sends a unicast reply back so the new peer discovers it too. Fixes the issue where newly connected peers couldn't see already-online peers across VLANs.
@@ -377,7 +394,7 @@ Hard-won lessons from building this on a real college LAN:
 
 - **mDNS alone is unreliable cross-platform** — Windows Firewall blocks multicast by default, and different subnets don't forward broadcast traffic. Always have fallback discovery methods.
 - **Polling-based discovery kills macOS performance** — scanning 1000+ IPs every 30s and blasting 65K UDP packets every 60s pegs the CPU. Fire-once + event-driven is the way.
-- **Electron CSP blocks inline handlers** — all event listeners must use `addEventListener` inside `DOMContentLoaded`, never `onclick` in HTML attributes.
+- **Electron CSP blocks inline handlers** — all event listeners must use `addEventListener` inside `DOMContentLoaded`, never `onclick` in HTML attributes. For dynamically generated HTML (file rows, peer cards, etc.), use event delegation with `data-action` attributes on a single `document.body` click handler instead of inline `onclick` — this is the only CSP-safe pattern that scales.
 - **electron-store data can corrupt** — always validate and repair persisted data on load to prevent crash loops.
 - **Windows paths need special escaping** — backslashes in paths like `C:\Users\...` break when injected into inline JavaScript via HTML.
 - **Peer liveness must be actively probed** — relying on mDNS browser restarts leaves stale peers visible; use HTTP health checks.

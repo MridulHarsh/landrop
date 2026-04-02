@@ -2,8 +2,11 @@
   ; ── Remove electron-store config data ──
   RMDir /r "$APPDATA\landrop"
 
-  ; ── Remove LANDrop downloads folder ──
+  ; ── Remove LANDrop downloads folder (includes .logs) ──
   RMDir /r "$PROFILE\Downloads\LANDrop"
+
+  ; ── Remove auto-updater temp files ──
+  RMDir /r "$TEMP\landrop-update"
 
   ; ── Remove Windows Firewall rules created by LANDrop ──
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="LANDrop App TCP In"'

@@ -39,6 +39,63 @@ const activeTransfers = new Map();
 let sharedFolders = store.get('sharedFolders') || [];
 let downloadPath = store.get('downloadPath') || path.join(os.homedir(), 'Downloads', 'LANDrop');
 
+// ─── Persistent Log File ────────────────────────────────────────────────────
+// Writes all diagnostic events to .logs/latest.log inside the download folder.
+// On startup, the previous latest.log is rotated to a timestamped filename.
+// This gives us a persistent record for debugging without filling disk forever.
+const LOG_DIR = path.join(downloadPath, '.logs');
+const LOG_FILE = path.join(LOG_DIR, 'latest.log');
+let logStream = null;
+
+function initLogger() {
+  try {
+    if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+    // Rotate previous latest.log to timestamped file
+    if (fs.existsSync(LOG_FILE)) {
+      try {
+        const stat = fs.statSync(LOG_FILE);
+        const dateStr = stat.mtime.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const rotatedName = path.join(LOG_DIR, `${dateStr}.log`);
+        fs.renameSync(LOG_FILE, rotatedName);
+        // Keep only last 10 rotated logs to avoid filling disk
+        const logs = fs.readdirSync(LOG_DIR).filter(f => f.endsWith('.log') && f !== 'latest.log').sort();
+        while (logs.length > 10) {
+          try { fs.unlinkSync(path.join(LOG_DIR, logs.shift())); } catch (e) {}
+        }
+      } catch (e) {}
+    }
+    logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
+    const now = new Date().toISOString();
+    const ver = require('./package.json').version;
+    logStream.write(`\n${'='.repeat(80)}\n`);
+    logStream.write(`LANDrop v${ver} — Session started ${now}\n`);
+    logStream.write(`Platform: ${process.platform} | Node: ${process.version} | Electron: ${process.versions.electron}\n`);
+    logStream.write(`Device ID: ${DEVICE_ID} | Download path: ${downloadPath}\n`);
+    logStream.write(`${'='.repeat(80)}\n\n`);
+  } catch (e) {
+    console.error('Failed to init logger:', e.message);
+  }
+}
+
+function writeLog(level, source, event, detail) {
+  if (!logStream) return;
+  try {
+    const ts = new Date().toISOString();
+    const detailStr = typeof detail === 'object' ? JSON.stringify(detail) : String(detail || '');
+    logStream.write(`[${ts}] [${level}] [${source}] ${event} ${detailStr}\n`);
+  } catch (e) {}
+}
+
+function closeLogger() {
+  if (logStream) {
+    try {
+      writeLog('INFO', 'app', 'session-end', `Uptime: ${Math.round(process.uptime())}s`);
+      logStream.end();
+    } catch (e) {}
+    logStream = null;
+  }
+}
+
 let deviceName = store.get('deviceName');
 if (!deviceName) { deviceName = os.hostname(); store.set('deviceName', deviceName); }
 
@@ -83,6 +140,7 @@ function dlog(source, event, detail = '') {
   discoveryLog.push(entry);
   if (discoveryLog.length > DISCOVERY_LOG_MAX) discoveryLog.shift();
   console.log(`[discovery] [${source}] ${event} ${entry.detail}`);
+  writeLog('DEBUG', source, event, entry.detail);
 }
 
 function computeFileHash(filePath) {
@@ -1158,9 +1216,24 @@ function startUDPDiscovery() {
 
         if (existing) {
           // ── Fast path: known peer heartbeat — just touch lastSeen, skip renderer ──
+          const portChanged = data.port && data.port !== existing.port;
           existing.lastSeen = Date.now();
+          if (portChanged) existing.port = data.port;
           if (peerName !== existing.name) { existing.name = peerName; schedulePeerUpdate(); }
           if (peerIP !== existing.host) { existing.host = peerIP; existing.addresses = [peerIP]; schedulePeerUpdate(); }
+
+          // If the peer's port changed, they restarted (new random Express port).
+          // That means they lost their peer list and are re-announcing via the
+          // startup wide campus blast. Reply immediately so they rediscover us.
+          if (portChanged) {
+            dlog('udp', 'peer-restarted', { name: peerName, ip: peerIP, newPort: data.port });
+            try {
+              const replyBuf = cachedBeaconBuf || buildBeaconBuffer();
+              udpSocket.send(replyBuf, 0, replyBuf.length, UDP_BROADCAST_PORT, peerIP);
+              dlog('udp', 'reply-sent-restart', { ip: peerIP, name: peerName });
+            } catch (e) {}
+            schedulePeerUpdate();
+          }
           return;
         }
 
@@ -1797,6 +1870,7 @@ function performDownload({ peerId, filePath, fileName, fileSize, destPath, resum
         if (transfer) transfer.status = 'complete';
         removeInterruptedDownload(peerId, filePath);
         sendToRenderer('transfer-complete', { id: transferId, path: destPath });
+        writeLog('INFO', 'transfer', 'download-complete', { fileName, size: downloaded, peer: peer.name });
       });
     });
     res.on('error', (err) => {
@@ -1805,6 +1879,7 @@ function performDownload({ peerId, filePath, fileName, fileSize, destPath, resum
       saveInterruptedDownload({ peerId, peerName: peer.name, filePath, fileName, fileSize, destPath, downloaded });
       activeTransfers.delete(transferId);
       sendToRenderer('transfer-error', { id: transferId, error: err.message, resumable: true });
+      writeLog('WARN', 'transfer', 'download-error', { fileName, error: err.message, downloaded });
     });
   });
 
@@ -2137,13 +2212,19 @@ function setupIPC() {
     // 1. Clear electron-store (config.json)
     store.clear();
 
-    // 2. Remove downloads folder
+    // 2. Remove downloads folder (includes .logs)
     try {
       const dlPath = downloadPath || path.join(os.homedir(), 'Downloads', 'LANDrop');
       if (fs.existsSync(dlPath)) fs.rmSync(dlPath, { recursive: true, force: true });
     } catch (e) {}
 
-    // 3. Remove Windows firewall rules
+    // 3. Remove auto-updater temp files
+    try {
+      const updaterTemp = path.join(app.getPath('temp'), 'landrop-update');
+      if (fs.existsSync(updaterTemp)) fs.rmSync(updaterTemp, { recursive: true, force: true });
+    } catch (e) {}
+
+    // 4. Remove Windows firewall rules
     if (process.platform === 'win32') {
       try {
         execFile('netsh', ['advfirewall', 'firewall', 'delete', 'rule', 'name=LANDrop App TCP In']);
@@ -2153,13 +2234,14 @@ function setupIPC() {
       } catch (e) {}
     }
 
-    // 4. Remove the electron-store config file itself
+    // 5. Remove the electron-store config file itself
     try {
       const configPath = path.join(app.getPath('userData'), 'config.json');
       if (fs.existsSync(configPath)) fs.unlinkSync(configPath);
     } catch (e) {}
 
-    // 5. Quit the app
+    // 6. Close logger and quit
+    closeLogger();
     app.quit();
     return { ok: true };
   });
@@ -2168,6 +2250,7 @@ function setupIPC() {
     id: DEVICE_ID, name: getDisplayName(), port: actualPort, platform: process.platform,
     sharedFolders, downloadPath, ip: getLocalIP(),
     profile: userProfile,
+    version: require('./package.json').version,
   }));
 
   // Profile management
@@ -2283,6 +2366,52 @@ function setupIPC() {
     }
 
     return { ok: true, sources: sources.length };
+  });
+
+  // ── Download entire folder from peer ────────────────────────────────────────
+  // Browses the peer's files, filters by folder name, recreates the subfolder
+  // structure locally, and downloads each file sequentially.
+  ipcMain.handle('download-folder', async (_, { peerId, folderName }) => {
+    const peer = peers.get(peerId);
+    if (!peer) return { error: 'Peer offline' };
+    const addr = getPeerAddr(peer);
+
+    // Fetch the peer's full file listing
+    let listing;
+    try {
+      listing = JSON.parse(await httpGet(`http://${addr}:${peer.port}/api/files`));
+    } catch (e) { return { error: `Cannot reach peer: ${e.message}` }; }
+
+    // Filter files belonging to this folder
+    const folderFiles = (listing.files || []).filter(f => f.folder === folderName);
+    if (folderFiles.length === 0) return { error: 'No files found in folder' };
+
+    // Create the folder locally under downloadPath
+    const localFolderBase = path.join(downloadPath, folderName);
+    if (!fs.existsSync(localFolderBase)) fs.mkdirSync(localFolderBase, { recursive: true });
+
+    // Download each file, preserving relative path (subfolder structure)
+    let started = 0;
+    for (const file of folderFiles) {
+      // relativePath is like "subdir/file.txt" or just "file.txt"
+      const relPath = file.relativePath || file.name;
+      const localDir = path.join(localFolderBase, path.dirname(relPath));
+      if (!fs.existsSync(localDir)) fs.mkdirSync(localDir, { recursive: true });
+
+      const destFileName = path.basename(relPath);
+      const destPath = path.join(localDir, destFileName);
+
+      // Skip if already fully downloaded
+      if (fs.existsSync(destPath)) {
+        try { if (fs.statSync(destPath).size >= file.size) continue; } catch (e) {}
+      }
+
+      // Use the existing download engine (supports resume, swarm, etc)
+      performDownload({ peerId, filePath: file.path, fileName: destFileName, fileSize: file.size, destPath });
+      started++;
+    }
+
+    return { ok: true, fileCount: started, totalFiles: folderFiles.length, folder: folderName };
   });
 
   // Get interrupted downloads for UI
@@ -2494,17 +2623,25 @@ function setupIPC() {
     return { error: 'Installer not found' };
   });
   ipcMain.handle('dismiss-update', () => {
-    // User dismissed — don't show again for this version in this session
+    // Snooze — hide the banner for 1 hour, then re-show
     updateDismissed = true;
+    updateSnoozeUntil = Date.now() + 3600000; // 1 hour
     return { ok: true };
   });
-  ipcMain.handle('get-update-status', () => ({
-    available: !!updateInfo,
-    downloading: updateDownloading,
-    ready: !!updateInstallerPath,
-    dismissed: updateDismissed,
-    info: updateInfo,
-  }));
+  ipcMain.handle('get-update-status', () => {
+    // Auto-unsnooze if the snooze period has elapsed
+    if (updateDismissed && updateSnoozeUntil && Date.now() > updateSnoozeUntil) {
+      updateDismissed = false;
+      updateSnoozeUntil = 0;
+    }
+    return {
+      available: !!updateInfo,
+      downloading: updateDownloading,
+      ready: !!updateInstallerPath,
+      dismissed: updateDismissed,
+      info: updateInfo,
+    };
+  });
 }
 
 // ─── Auto-Update System ──────────────────────────────────────────────────────
@@ -2524,6 +2661,7 @@ let updateInfo = null;          // { version, downloadUrl, releaseUrl, releaseNa
 let updateInstallerPath = null; // path to downloaded installer
 let updateDownloading = false;
 let updateDismissed = false;
+let updateSnoozeUntil = 0;   // timestamp when snooze expires
 
 function compareVersions(a, b) {
   // Returns >0 if a > b, 0 if equal, <0 if a < b
@@ -2560,7 +2698,7 @@ async function checkForUpdates() {
 
     const remoteVersion = data.tag_name; // e.g. "v1.2.0"
     if (compareVersions(remoteVersion, currentVersion) <= 0) {
-      console.log(`[updater] up to date (local=${currentVersion}, remote=${remoteVersion})`);
+      writeLog('INFO', 'updater', 'up-to-date', `local=${currentVersion}, remote=${remoteVersion}`); console.log(`[updater] up to date (local=${currentVersion}, remote=${remoteVersion})`);
       return;
     }
 
@@ -2719,6 +2857,7 @@ function cleanup() {
   if (bonjour) { try { bonjour.destroy(); } catch (e) {} bonjour = null; }
   if (wsServer) { try { wsServer.close(); } catch (e) {} wsServer = null; }
   if (httpServer) { try { httpServer.close(); } catch (e) {} httpServer = null; }
+  closeLogger();
 }
 
 // ─── Window ──────────────────────────────────────────────────────────────────
@@ -2753,8 +2892,10 @@ function createWindow() {
 
 // ─── App Lifecycle ───────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
+  initLogger();
   try {
     await createServer();
+    writeLog('INFO', 'app', 'server-started', `port ${actualPort}`);
     startDiscovery();
     setupIPC();
     createWindow();
@@ -2763,11 +2904,12 @@ app.whenReady().then(async () => {
     startCatalogSync();
     setTimeout(() => { try { retryInterruptedDownloads(); } catch (e) {} }, 5000);
     setTimeout(() => { try { reprobeKnownPeers(); } catch (e) {} }, 3000);
-    // Check for updates after a delay so it doesn't slow down startup
     setTimeout(() => { try { checkForUpdates(); } catch (e) { console.log('[updater] error:', e.message); } }, UPDATE_CHECK_DELAY);
+    writeLog('INFO', 'app', 'startup-complete', `peers: ${peers.size}, shared folders: ${sharedFolders.length}`);
   } catch (e) {
     console.error('Startup error:', e);
-    createWindow(); // at minimum show the window
+    writeLog('ERROR', 'app', 'startup-error', e.message);
+    createWindow();
   }
   app.on('activate', () => { if (mainWindow) mainWindow.show(); else createWindow(); });
 });

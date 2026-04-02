@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('landrop', {
 
   // Transfers
   downloadFile: (opts) => ipcRenderer.invoke('download-file', opts),
+  downloadFolder: (opts) => ipcRenderer.invoke('download-folder', opts),
   pushFileToPeer: (opts) => ipcRenderer.invoke('push-file-to-peer', opts),
   selectFilesToSend: () => ipcRenderer.invoke('select-files-to-send'),
   getTransfers: () => ipcRenderer.invoke('get-transfers'),
