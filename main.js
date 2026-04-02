@@ -351,8 +351,8 @@ function getCatalogStats() {
 function startCatalogSync() {
   // Initial sync after 3 seconds (let peers discover first)
   setTimeout(() => syncAllCatalogs(), 3000);
-  // Then sync every 30 seconds
-  catalogSyncInterval = setInterval(() => syncAllCatalogs(), 30000);
+  // Then sync every 60 seconds (was 30s — file listings rarely change that fast)
+  catalogSyncInterval = setInterval(() => syncAllCatalogs(), 60000);
 }
 
 // Search the local catalog — returns results grouped by hash
@@ -465,6 +465,40 @@ if (!fs.existsSync(downloadPath)) fs.mkdirSync(downloadPath, { recursive: true }
 function sendToRenderer(channel, data) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, data);
 }
+
+// ─── Throttled Peer Updates ──────────────────────────────────────────────────
+// Avoid flooding the renderer with peers-updated when many beacons arrive at once.
+let peerUpdatePending = false;
+let peerUpdateTimer = null;
+const PEER_UPDATE_THROTTLE = 300; // ms — batch updates within this window
+function schedulePeerUpdate() {
+  peerUpdatePending = true;
+  if (!peerUpdateTimer) {
+    peerUpdateTimer = setTimeout(() => {
+      peerUpdateTimer = null;
+      if (peerUpdatePending) {
+        peerUpdatePending = false;
+        sendToRenderer('peers-updated', getVisiblePeers());
+      }
+    }, PEER_UPDATE_THROTTLE);
+  }
+}
+
+// ─── Cached Network Interfaces ──────────────────────────────────────────────
+// os.networkInterfaces() is surprisingly expensive when called every 10s across
+// multiple subsystems. Cache the result and refresh every 30 seconds or on demand.
+let cachedInterfaces = null;
+let cachedInterfacesAge = 0;
+const INTERFACE_CACHE_TTL = 30000; // 30s
+function getCachedInterfaces() {
+  const now = Date.now();
+  if (!cachedInterfaces || now - cachedInterfacesAge > INTERFACE_CACHE_TTL) {
+    cachedInterfaces = os.networkInterfaces();
+    cachedInterfacesAge = now;
+  }
+  return cachedInterfaces;
+}
+function invalidateInterfaceCache() { cachedInterfaces = null; }
 
 function hasActiveTransfers() {
   for (const [, t] of activeTransfers) {
@@ -971,21 +1005,30 @@ function startDiscovery() {
     txt: { id: DEVICE_ID, name: getDisplayName(), platform: process.platform, mac: myMacAddress, ip: myIP }
   });
   startBrowsing();
-  discoveryInterval = setInterval(() => { stopBrowsing(); startBrowsing(); }, 60000);
+
+  // ─── Adaptive mDNS browser refresh ────────────────────────────────────────
+  // Old: restart every 60s — expensive bonjour teardown/rebuild.
+  // New: restart every 5 minutes. mDNS is event-driven (up/down callbacks) so
+  //      restarting is only needed to recover from rare missed events.
+  discoveryInterval = setInterval(() => { stopBrowsing(); startBrowsing(); }, 300000);
+
+  // ─── Stale peer cleanup ───────────────────────────────────────────────────
+  // Old: every 45s, probe ALL stale peers.
+  // New: every 90s, only probe peers stale >120s (2 missed UDP beacon cycles).
+  //      This dramatically reduces HTTP probe traffic.
   staleCleanupInterval = setInterval(async () => {
     const now = Date.now(); const staleIds = [];
-    for (const [id, peer] of peers) if (now - peer.lastSeen > 60000) staleIds.push(id);
+    for (const [id, peer] of peers) if (now - peer.lastSeen > 120000) staleIds.push(id);
     if (staleIds.length === 0) return;
-    // Probe all stale peers in parallel (not sequentially) to avoid blocking
     const results = await Promise.allSettled(staleIds.map(async (id) => {
       const peer = peers.get(id); if (!peer) return;
       const h = await probePeer(peer);
       if (!h) { peers.delete(id); dlog('stale', 'removed', { id, name: peer.name }); }
       else { peer.lastSeen = Date.now(); if (h.deviceName) peer.name = h.deviceName; }
     }));
-    sendToRenderer('peers-updated', getVisiblePeers());
+    schedulePeerUpdate();
     retryInterruptedDownloads();
-  }, 45000);
+  }, 90000);
 
   // Configure Windows firewall (needs actualPort to be set)
   ensureWindowsFirewall();
@@ -1001,10 +1044,28 @@ function startDiscovery() {
 }
 
 // ─── UDP Broadcast Discovery (cross-platform fallback) ───────────────────────
-// Sends a UDP broadcast beacon every 5 seconds with our device info.
+// Sends a UDP broadcast beacon periodically with our device info.
 // All LANDrop instances listen on the same port and add any new peers they hear.
 // This works even when mDNS is blocked by firewalls (common on Windows) or when
 // macOS and Windows mDNS implementations don't interoperate.
+//
+// v1.1.1: Beacon interval increased from 10s → 30s (still fast enough to keep
+//         peers alive within the 120s stale window). Known-peer UDP messages
+//         only update lastSeen without triggering renderer updates.
+
+let cachedBeaconBuf = null; // cached serialized beacon to avoid re-serializing every 30s
+
+function buildBeaconBuffer() {
+  cachedBeaconBuf = Buffer.from(JSON.stringify({
+    type: 'landrop-beacon',
+    id: DEVICE_ID,
+    name: getDisplayName(),
+    port: actualPort,
+    platform: process.platform,
+    mac: myMacAddress,
+  }), 'utf8');
+  return cachedBeaconBuf;
+}
 
 function startUDPDiscovery() {
   try {
@@ -1030,10 +1091,16 @@ function startUDPDiscovery() {
 
         const peerName = data.name || (existing && existing.name) || peerIP;
 
-        if (!existing) {
-          dlog('udp', 'new-peer', { name: peerName, ip: peerIP, port: data.port, platform: data.platform });
+        if (existing) {
+          // ── Fast path: known peer heartbeat — just touch lastSeen, skip renderer ──
+          existing.lastSeen = Date.now();
+          if (peerName !== existing.name) { existing.name = peerName; schedulePeerUpdate(); }
+          if (peerIP !== existing.host) { existing.host = peerIP; existing.addresses = [peerIP]; schedulePeerUpdate(); }
+          return;
         }
 
+        // ── New peer ──
+        dlog('udp', 'new-peer', { name: peerName, ip: peerIP, port: data.port, platform: data.platform });
         peers.set(peerId, {
           id: peerId,
           name: peerName,
@@ -1044,13 +1111,10 @@ function startUDPDiscovery() {
           mac: peerMac,
           lastSeen: Date.now(),
         });
-        sendToRenderer('peers-updated', getVisiblePeers());
+        schedulePeerUpdate();
 
-        // Sync catalog if this is a new peer
-        if (!existing) {
-          const p = peers.get(peerId);
-          if (p) setTimeout(() => syncCatalogFromPeer(p), 1000);
-        }
+        const p = peers.get(peerId);
+        if (p) setTimeout(() => syncCatalogFromPeer(p), 1000);
       } catch (e) {
         dlog('udp', 'parse-error', e.message);
       }
@@ -1066,36 +1130,27 @@ function startUDPDiscovery() {
       }
     });
 
-    // Send beacon every 10 seconds
-    udpBroadcastInterval = setInterval(() => sendUDPBeacon(), 10000);
+    // Send beacon every 30 seconds (was 10s — 3× less CPU/network)
+    // 30s is well within the 120s stale threshold
+    udpBroadcastInterval = setInterval(() => sendUDPBeacon(), 30000);
     // Send immediately too
     setTimeout(() => sendUDPBeacon(), 500);
   } catch (e) {
     dlog('udp', 'start-failed', e.message);
-    // UDP discovery failed to start — mDNS is still running as primary
   }
 }
 
 function sendUDPBeacon() {
   if (!udpSocket) return;
   try {
-    const beacon = JSON.stringify({
-      type: 'landrop-beacon',
-      id: DEVICE_ID,
-      name: getDisplayName(),
-      port: actualPort,
-      platform: process.platform,
-      mac: myMacAddress,
-    });
-    const buf = Buffer.from(beacon, 'utf8');
+    const buf = cachedBeaconBuf || buildBeaconBuffer();
 
-    // Send to broadcast address of each network interface
-    const interfaces = os.networkInterfaces();
+    // Send to broadcast address of each network interface (using cache)
+    const interfaces = getCachedInterfaces();
     const sentTo = [];
     for (const name of Object.keys(interfaces)) {
       for (const iface of interfaces[name]) {
         if (iface.internal || iface.family !== 'IPv4') continue;
-        // Calculate broadcast address from IP and netmask
         const ipParts = iface.address.split('.').map(Number);
         const maskParts = iface.netmask.split('.').map(Number);
         const broadcastParts = ipParts.map((ip, i) => (ip | (~maskParts[i] & 255)));
@@ -1108,7 +1163,6 @@ function sendUDPBeacon() {
     }
     // Also send to global broadcast as a last-resort fallback
     try { udpSocket.send(buf, 0, buf.length, UDP_BROADCAST_PORT, '255.255.255.255'); sentTo.push('global->255.255.255.255'); } catch (e) {}
-    // Log only occasionally (every ~30s = 6th call) to avoid spamming
     if (discoveryLog.length === 0 || !discoveryLog.find(e => e.source === 'udp' && e.event === 'beacon-sent')) {
       dlog('udp', 'beacon-sent', `targets: ${sentTo.join(', ')}`);
     }
@@ -1140,7 +1194,7 @@ function startBrowsing() {
     let addresses = service.addresses || [];
     if (txt.ip && !addresses.includes(txt.ip)) addresses = [txt.ip, ...addresses];
     peers.set(peerId, { id: peerId, name: peerName, host: service.host, port: service.port, platform: txt.platform || (existing && existing.platform) || 'unknown', addresses, mac: peerMac, lastSeen: Date.now() });
-    sendToRenderer('peers-updated', getVisiblePeers());
+    schedulePeerUpdate();
     // Sync catalog from this peer if we haven't recently
     if (!existing) {
       const p = peers.get(peerId);
@@ -1153,7 +1207,7 @@ function startBrowsing() {
     const peerId = txt.id;
     if (peerId && peerId !== DEVICE_ID) {
       dlog('mdns', 'peer-down', { id: peerId, name: txt.name });
-      peers.delete(peerId); sendToRenderer('peers-updated', getVisiblePeers());
+      peers.delete(peerId); schedulePeerUpdate();
     }
   });
 }
@@ -1206,7 +1260,7 @@ function stopDiscoveryBeacon() {
 // Uses aggressive parallelism with short timeouts to complete in seconds.
 
 function getSubnetsToScan() {
-  const interfaces = os.networkInterfaces();
+  const interfaces = getCachedInterfaces();
   const subnets = [];
   for (const name of Object.keys(interfaces)) {
     for (const iface of interfaces[name]) {
@@ -1334,7 +1388,7 @@ async function scanSubnets() {
   }
 
   store.set('knownPeerIPs', knownPeerIPs);
-  if (found > 0) sendToRenderer('peers-updated', getVisiblePeers());
+  if (found > 0) schedulePeerUpdate();
   dlog('scanner', 'scan-complete', `found ${found} peers from ${ipList.length} IPs`);
 }
 
@@ -1365,15 +1419,7 @@ async function sendWideCampusBeacons() {
   const subnets = getSubnetsToScan();
   if (subnets.length === 0) { wideScanRunning = false; return; }
 
-  const beacon = JSON.stringify({
-    type: 'landrop-beacon',
-    id: DEVICE_ID,
-    name: getDisplayName(),
-    port: actualPort,
-    platform: process.platform,
-    mac: myMacAddress,
-  });
-  const buf = Buffer.from(beacon, 'utf8');
+  const buf = cachedBeaconBuf || buildBeaconBuffer();
 
   // Collect /16 prefixes and our own local /23 blocks to skip
   const prefixes = new Set();
@@ -1387,7 +1433,7 @@ async function sendWideCampusBeacons() {
 
   let sent = 0;
   let errors = 0;
-  const BATCH = 200; // send 200 packets then yield to the event loop
+  const BATCH = 100; // yield every 100 packets (was 200) for smoother UI
 
   for (const prefix of prefixes) {
     let batchCount = 0;
@@ -1413,8 +1459,8 @@ async function sendWideCampusBeacons() {
         batchCount++;
         if (batchCount >= BATCH) {
           batchCount = 0;
-          // Yield to the event loop so IPC, rendering, etc. aren't blocked
-          await new Promise(resolve => setImmediate(resolve));
+          // Yield to event loop + small delay to avoid saturating macOS network stack
+          await new Promise(resolve => setTimeout(resolve, 1));
         }
       }
     }
@@ -1432,15 +1478,7 @@ function sendWideBroadcastBeacons() {
   const subnets = getSubnetsToScan();
   if (subnets.length === 0) return;
 
-  const beacon = JSON.stringify({
-    type: 'landrop-beacon',
-    id: DEVICE_ID,
-    name: getDisplayName(),
-    port: actualPort,
-    platform: process.platform,
-    mac: myMacAddress,
-  });
-  const buf = Buffer.from(beacon, 'utf8');
+  const buf = cachedBeaconBuf || buildBeaconBuffer();
 
   const prefixes = new Set();
   const myBlocks = new Set();
@@ -1466,29 +1504,38 @@ function sendWideBroadcastBeacons() {
 }
 
 function startSubnetScanner() {
-  // First local scan after 5 seconds (let the beacon server start first)
-  setTimeout(() => scanSubnets(), 5000);
-  // Then local scan every 30 seconds
-  subnetScanInterval = setInterval(() => scanSubnets(), 30000);
+  // ─── v1.1.1 Fire-Once Discovery Model ─────────────────────────────────────
+  //
+  // STRATEGY: Wide campus blast runs ONLY at startup. After that, peer liveness
+  // is maintained by the stale-cleanup prober (90s) and UDP heartbeat beacons
+  // (30s). New peers are discovered passively — when they launch and fire their
+  // own startup blast, our UDP listener picks them up automatically.
+  //
+  // Manual Refresh (button) still triggers a full blast as an escape hatch.
+  //
+  // Why this works:
+  //   - Every new LANDrop instance blasts on startup → existing peers hear it
+  //   - mDNS handles same-subnet discovery event-driven (no polling)
+  //   - UDP heartbeat (30s) keeps peers' lastSeen fresh
+  //   - Stale prober (90s) catches peers that went offline silently
+  //
+  // Old model: subnet scan every 30s (1022 HTTP probes!) + wide blast every 60s
+  //            (~65K UDP packets). This hammered macOS CPU and network constantly.
 
-  // Wide campus UDP unicast blaster:
-  // First blast after 3 seconds for fast initial discovery.
-  // Then every 60 seconds — once a peer is found via UDP, it stays
-  // in the known peers list and gets reprobed directly, so we don't
-  // need to blast the whole /16 frequently.
+  // ── Startup burst: one local scan + two wide blasts ──
+  setTimeout(() => scanSubnets(), 4000);
   setTimeout(() => {
     sendWideBroadcastBeacons();
     sendWideCampusBeacons();
   }, 3000);
-  // Do a second quick blast at 18 seconds for peers that started slightly later
+  // Second blast at 15s catches peers that started a few seconds after us
   setTimeout(() => {
     sendWideBroadcastBeacons();
     sendWideCampusBeacons();
-  }, 18000);
-  wideScanInterval = setInterval(() => {
-    sendWideBroadcastBeacons();
-    sendWideCampusBeacons();
-  }, 60000);
+  }, 15000);
+
+  // No periodic intervals — that's the whole point.
+  // subnetScanInterval and wideScanInterval remain null.
 }
 
 function stopSubnetScanner() {
@@ -1551,7 +1598,7 @@ async function probeDirectIP(ip, port = null) {
         knownPeerIPs.push({ ip, port: p, lastSeen: Date.now() });
         store.set('knownPeerIPs', knownPeerIPs);
 
-        sendToRenderer('peers-updated', getVisiblePeers());
+        schedulePeerUpdate();
         setTimeout(() => syncCatalogFromPeer(peers.get(data.deviceId)), 1000);
 
         return { ok: true, name: data.deviceName, id: data.deviceId };
@@ -1886,6 +1933,10 @@ async function performSwarmDownload({ sources, fileName, fileSize, fileHash }) {
 function setupIPC() {
   ipcMain.handle('get-peers', () => getVisiblePeers());
   ipcMain.handle('refresh-discovery', async () => {
+    // Invalidate caches so we get fresh network state
+    invalidateInterfaceCache();
+    cachedBeaconBuf = null;
+
     // Probe all existing peers in parallel — remove any that don't respond
     const probeResults = await Promise.allSettled(
       Array.from(peers.entries()).map(async ([id, peer]) => {
@@ -1902,6 +1953,11 @@ function setupIPC() {
     // Restart mDNS browser to discover new peers
     stopBrowsing();
     startBrowsing();
+    // Manual refresh = full re-discovery (escape hatch for the fire-once model)
+    sendUDPBeacon();
+    sendWideBroadcastBeacons();
+    sendWideCampusBeacons();   // full /16 blast — only runs on explicit user action
+    scanSubnets();             // local subnet HTTP probe
     sendToRenderer('peers-updated', getVisiblePeers());
     return getVisiblePeers();
   });
@@ -1947,7 +2003,7 @@ function setupIPC() {
   });
 
   ipcMain.handle('get-discovery-status', () => {
-    const interfaces = os.networkInterfaces();
+    const interfaces = getCachedInterfaces();
     const nets = [];
     for (const name of Object.keys(interfaces)) {
       for (const iface of interfaces[name]) {
@@ -2350,6 +2406,9 @@ function cleanup() {
   if (discoveryInterval) { clearInterval(discoveryInterval); discoveryInterval = null; }
   if (staleCleanupInterval) { clearInterval(staleCleanupInterval); staleCleanupInterval = null; }
   if (catalogSyncInterval) { clearInterval(catalogSyncInterval); catalogSyncInterval = null; }
+  if (peerUpdateTimer) { clearTimeout(peerUpdateTimer); peerUpdateTimer = null; }
+  cachedBeaconBuf = null;
+  invalidateInterfaceCache();
   stopBrowsing();
   stopFolderWatchers();
   stopUDPDiscovery();
