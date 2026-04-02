@@ -74,6 +74,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     await window.landrop.factoryReset();
   });
 
+  // Auto-update
+  on('btn-update-install', 'click', () => window.landrop.installUpdate());
+  on('btn-update-dismiss', 'click', () => {
+    window.landrop.dismissUpdate();
+    document.getElementById('update-banner')?.classList.add('hidden');
+    document.body.classList.remove('has-update-banner');
+  });
+
   // Bug report
   on('btn-send-bugreport', 'click', () => {
     window.landrop.openExternal('mailto:f20230844@pilani.bits-pilani.ac.in?subject=LANDrop%20Bug%20Report&body=Bug%20Description:%0A%0ASteps%20to%20Reproduce:%0A1.%0A2.%0A3.%0A%0AExpected%20Behavior:%0A%0AOS%20%26%20Version:%0A');
@@ -218,6 +226,49 @@ async function initApp() {
     if (currentView === 'chat') loadConversations();
     updateChatBadge();
   });
+
+  // ── Auto-Update Events ──────────────────────────────────────────────────────
+  function showUpdateBanner() {
+    document.getElementById('update-banner')?.classList.remove('hidden');
+    document.body.classList.add('has-update-banner');
+  }
+
+  window.landrop.onUpdateAvailable((data) => {
+    document.getElementById('update-banner-text').textContent = `LANDrop v${data.version} is available — downloading installer…`;
+    document.getElementById('btn-update-install').disabled = true;
+    document.getElementById('btn-update-install').textContent = 'Downloading…';
+    document.getElementById('update-progress').textContent = '';
+    showUpdateBanner();
+  });
+
+  window.landrop.onUpdateReady((data) => {
+    document.getElementById('update-banner-text').textContent = `LANDrop v${data.version} is ready to install`;
+    document.getElementById('update-progress').textContent = '';
+    const btn = document.getElementById('btn-update-install');
+    btn.disabled = false;
+    btn.textContent = 'Install & Restart';
+    showUpdateBanner();
+  });
+
+  window.landrop.onUpdateDownloadProgress((data) => {
+    document.getElementById('update-progress').textContent = `${data.percent}%`;
+  });
+
+  // Check if an update was already found before renderer loaded (race condition guard)
+  try {
+    const status = await window.landrop.getUpdateStatus();
+    if (status.available && !status.dismissed) {
+      if (status.ready) {
+        document.getElementById('update-banner-text').textContent = `LANDrop v${status.info.version} is ready to install`;
+        const btn = document.getElementById('btn-update-install');
+        btn.disabled = false;
+        btn.textContent = 'Install & Restart';
+      } else if (status.downloading) {
+        document.getElementById('update-banner-text').textContent = `LANDrop v${status.info.version} is available — downloading installer…`;
+      }
+      showUpdateBanner();
+    }
+  } catch (e) {}
 }
 
 // ─── Navigation ──────────────────────────────────────────────────────────────

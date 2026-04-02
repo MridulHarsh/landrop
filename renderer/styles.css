@@ -834,6 +834,43 @@ html, body {
   to   { opacity: 0; transform: translateY(10px); }
 }
 
+/* ─── Update Banner ───────────────────────────────────────────────────────── */
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 20px;
+  background: linear-gradient(90deg, var(--accent), #7c6cf7);
+  color: white;
+  font-size: 13px;
+  gap: 12px;
+  position: fixed;
+  top: var(--titlebar-h);
+  left: 0;
+  right: 0;
+  z-index: 200;
+  animation: bannerSlideIn 0.3s ease;
+}
+.update-banner.hidden { display: none; }
+.update-banner-content { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.update-banner-content svg { flex-shrink: 0; }
+.update-banner-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.update-progress { font-family: var(--font-mono); font-size: 11px; opacity: 0.8; }
+.btn-sm { padding: 5px 14px !important; font-size: 12px !important; min-height: unset !important; }
+.update-banner .btn-ghost { color: rgba(255,255,255,0.85); border-color: rgba(255,255,255,0.3); }
+.update-banner .btn-ghost:hover { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.5); }
+.update-banner .btn-primary { background: white; color: var(--accent); font-weight: 600; }
+.update-banner .btn-primary:hover { background: rgba(255,255,255,0.9); }
+.update-banner .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Shift app-container down when banner is visible */
+body.has-update-banner .app-container { height: calc(100vh - var(--titlebar-h) - 36px); margin-top: 36px; }
+
+@keyframes bannerSlideIn {
+  from { opacity: 0; transform: translateY(-100%); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 /* ─── Registration Overlay ─────────────────────────────────────────────────── */
 .registration-overlay {
   position: fixed;

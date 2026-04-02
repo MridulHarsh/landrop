@@ -2399,6 +2399,218 @@ function setupIPC() {
   ipcMain.handle('open-external', (_, url) => shell.openExternal(url));
   ipcMain.handle('get-transfers', () => Array.from(activeTransfers.entries()).map(([id, t]) => ({ id, ...t })));
   ipcMain.handle('has-active-transfers', () => hasActiveTransfers());
+
+  // ── Auto-Update ─────────────────────────────────────────────────────────────
+  ipcMain.handle('install-update', () => {
+    if (updateInstallerPath && fs.existsSync(updateInstallerPath)) {
+      shell.openPath(updateInstallerPath);
+      // Give the installer a moment to start, then quit
+      setTimeout(() => { forceQuit = true; isQuitting = true; cleanup(); app.quit(); }, 1500);
+      return { ok: true };
+    }
+    return { error: 'Installer not found' };
+  });
+  ipcMain.handle('dismiss-update', () => {
+    // User dismissed — don't show again for this version in this session
+    updateDismissed = true;
+    return { ok: true };
+  });
+  ipcMain.handle('get-update-status', () => ({
+    available: !!updateInfo,
+    downloading: updateDownloading,
+    ready: !!updateInstallerPath,
+    dismissed: updateDismissed,
+    info: updateInfo,
+  }));
+}
+
+// ─── Auto-Update System ──────────────────────────────────────────────────────
+// Checks GitHub Releases API for a newer version on startup. If found, downloads
+// the correct installer (.dmg for macOS, .exe for Windows) in the background,
+// then notifies the renderer to show an "Update available — Install now" banner.
+//
+// • No polling — checks once on launch, that's it.
+// • GitHub Releases are free and public, no server needed.
+// • The app never auto-installs. User clicks "Install" to open the installer.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const GITHUB_REPO = store.get('githubRepo') || 'MridulHarsh/landrop'; // owner/repo
+const UPDATE_CHECK_DELAY = 8000; // wait 8s after launch to avoid slowing startup
+
+let updateInfo = null;          // { version, downloadUrl, releaseUrl, releaseName, body }
+let updateInstallerPath = null; // path to downloaded installer
+let updateDownloading = false;
+let updateDismissed = false;
+
+function compareVersions(a, b) {
+  // Returns >0 if a > b, 0 if equal, <0 if a < b
+  const pa = a.replace(/^v/, '').split('.').map(Number);
+  const pb = b.replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+async function checkForUpdates() {
+  const currentVersion = require('./package.json').version;
+  const url = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
+
+  try {
+    const data = await new Promise((resolve, reject) => {
+      const req = https.get(url, {
+        headers: { 'User-Agent': `LANDrop/${currentVersion}`, 'Accept': 'application/vnd.github.v3+json' },
+        timeout: 10000,
+      }, (res) => {
+        if (res.statusCode === 404) return resolve(null); // no releases yet
+        if (res.statusCode !== 200) return reject(new Error(`GitHub API ${res.statusCode}`));
+        let body = '';
+        res.on('data', (d) => body += d);
+        res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    });
+
+    if (!data || !data.tag_name) return;
+
+    const remoteVersion = data.tag_name; // e.g. "v1.2.0"
+    if (compareVersions(remoteVersion, currentVersion) <= 0) {
+      console.log(`[updater] up to date (local=${currentVersion}, remote=${remoteVersion})`);
+      return;
+    }
+
+    // Find the right asset for this platform
+    const assets = data.assets || [];
+    const platform = process.platform; // 'darwin' or 'win32'
+    let asset = null;
+
+    if (platform === 'darwin') {
+      asset = assets.find(a => a.name.endsWith('.dmg'));
+    } else if (platform === 'win32') {
+      asset = assets.find(a => a.name.endsWith('.exe'));
+    }
+
+    if (!asset) {
+      console.log(`[updater] new version ${remoteVersion} found but no installer for ${platform}`);
+      return;
+    }
+
+    updateInfo = {
+      version: remoteVersion.replace(/^v/, ''),
+      downloadUrl: asset.browser_download_url,
+      fileName: asset.name,
+      fileSize: asset.size,
+      releaseUrl: data.html_url,
+      releaseName: data.name || remoteVersion,
+      body: (data.body || '').slice(0, 500), // truncate release notes
+    };
+
+    console.log(`[updater] update available: ${currentVersion} → ${updateInfo.version} (${asset.name}, ${(asset.size / 1024 / 1024).toFixed(1)}MB)`);
+
+    // Notify renderer that an update is available (download starting)
+    sendToRenderer('update-available', { ...updateInfo, downloading: true, ready: false });
+
+    // Download in background
+    await downloadUpdate(updateInfo);
+
+  } catch (e) {
+    // Update check failed silently — not critical
+    console.log(`[updater] check failed: ${e.message}`);
+  }
+}
+
+function downloadUpdate(info) {
+  return new Promise((resolve) => {
+    updateDownloading = true;
+    const tmpDir = path.join(app.getPath('temp'), 'landrop-update');
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+    const destPath = path.join(tmpDir, info.fileName);
+
+    // If already downloaded (from a previous check this session), skip
+    if (fs.existsSync(destPath)) {
+      const stat = fs.statSync(destPath);
+      if (stat.size === info.fileSize) {
+        console.log(`[updater] installer already downloaded: ${destPath}`);
+        updateInstallerPath = destPath;
+        updateDownloading = false;
+        sendToRenderer('update-ready', { ...info, path: destPath });
+        return resolve();
+      }
+      // Partial/corrupt — delete and re-download
+      fs.unlinkSync(destPath);
+    }
+
+    const file = fs.createWriteStream(destPath);
+    let downloaded = 0;
+
+    function doDownload(downloadUrl) {
+      const mod = downloadUrl.startsWith('https') ? https : http;
+      const req = mod.get(downloadUrl, {
+        headers: { 'User-Agent': `LANDrop/${require('./package.json').version}` },
+        timeout: 60000,
+      }, (res) => {
+        // Follow redirects (GitHub uses 302 for asset downloads)
+        if (res.statusCode === 301 || res.statusCode === 302) {
+          const redirectUrl = res.headers.location;
+          if (redirectUrl) return doDownload(redirectUrl);
+        }
+
+        if (res.statusCode !== 200) {
+          console.log(`[updater] download failed: HTTP ${res.statusCode}`);
+          updateDownloading = false;
+          try { file.close(); fs.unlinkSync(destPath); } catch (e) {}
+          return resolve();
+        }
+
+        const totalSize = parseInt(res.headers['content-length'], 10) || info.fileSize;
+
+        res.on('data', (chunk) => {
+          file.write(chunk);
+          downloaded += chunk.length;
+          // Send progress every ~500KB to avoid flooding IPC
+          if (downloaded % (512 * 1024) < chunk.length) {
+            sendToRenderer('update-download-progress', {
+              downloaded,
+              total: totalSize,
+              percent: Math.round((downloaded / totalSize) * 100),
+            });
+          }
+        });
+
+        res.on('end', () => {
+          file.end(() => {
+            if (downloaded >= totalSize * 0.95) { // allow small variance
+              console.log(`[updater] download complete: ${destPath} (${(downloaded / 1024 / 1024).toFixed(1)}MB)`);
+              updateInstallerPath = destPath;
+              updateDownloading = false;
+              sendToRenderer('update-ready', { ...info, path: destPath });
+            } else {
+              console.log(`[updater] download incomplete: ${downloaded}/${totalSize}`);
+              updateDownloading = false;
+              try { fs.unlinkSync(destPath); } catch (e) {}
+            }
+            resolve();
+          });
+        });
+      });
+      req.on('error', (e) => {
+        console.log(`[updater] download error: ${e.message}`);
+        updateDownloading = false;
+        try { file.close(); fs.unlinkSync(destPath); } catch (e2) {}
+        resolve();
+      });
+      req.on('timeout', () => {
+        req.destroy();
+        updateDownloading = false;
+        try { file.close(); fs.unlinkSync(destPath); } catch (e) {}
+        resolve();
+      });
+    }
+
+    doDownload(info.downloadUrl);
+  });
 }
 
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
@@ -2468,6 +2680,8 @@ app.whenReady().then(async () => {
     startCatalogSync();
     setTimeout(() => { try { retryInterruptedDownloads(); } catch (e) {} }, 5000);
     setTimeout(() => { try { reprobeKnownPeers(); } catch (e) {} }, 3000);
+    // Check for updates after a delay so it doesn't slow down startup
+    setTimeout(() => { try { checkForUpdates(); } catch (e) { console.log('[updater] error:', e.message); } }, UPDATE_CHECK_DELAY);
   } catch (e) {
     console.error('Startup error:', e);
     createWindow(); // at minimum show the window

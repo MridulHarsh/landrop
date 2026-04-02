@@ -39,6 +39,19 @@
     </div>
   </div>
 
+  <!-- Update banner (shown when a new version is available) -->
+  <div class="update-banner hidden" id="update-banner">
+    <div class="update-banner-content">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 19V5"/><polyline points="5 12 12 5 19 12"/></svg>
+      <span id="update-banner-text">A new version is available</span>
+      <span class="update-progress" id="update-progress"></span>
+    </div>
+    <div class="update-banner-actions">
+      <button class="btn btn-ghost btn-sm" id="btn-update-dismiss">Later</button>
+      <button class="btn btn-primary btn-sm" id="btn-update-install" disabled>Downloading…</button>
+    </div>
+  </div>
+
   <!-- Main Layout -->
   <div class="app-container">
     <nav class="sidebar" id="sidebar">

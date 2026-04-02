@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-blue" alt="Platform">
   <img src="https://img.shields.io/badge/built%20with-Electron-47848f" alt="Electron">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-  <img src="https://img.shields.io/badge/version-1.1.1-orange" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.2.0-orange" alt="Version">
 </p>
 
 ---
@@ -63,6 +63,7 @@ Unlike DC++, LANDrop requires **no hub server** and **no configuration**. Instal
 - **Dark theme** — modern dark UI designed for long sessions
 - **Live transfer tracking** — real-time progress bars with speed indicators on both upload and download sides
 - **Transfer bar** — floating bottom bar shows active transfers from any view
+- **Auto-update** — checks GitHub Releases on launch, downloads the installer in the background, and prompts to install with one click (new in v1.2.0)
 - **First-launch registration** — simple name/username setup, no account needed
 - **Cross-platform** — native builds for macOS (.dmg) and Windows (.exe installer)
 - **Factory reset** — in-app "Delete All Data & Reset" option in Settings
@@ -126,6 +127,19 @@ All transfers use plain HTTP for simplicity and compatibility:
 - **Pushes:** `POST /api/push-request` (consent) → `POST /api/push-upload` (multipart upload)
 - **Swarm:** parallel `GET` requests with `Range` headers to multiple peers serving the same file (matched by SHA-256 hash)
 
+### Auto-Update (v1.2.0)
+
+The app checks for updates automatically on every launch:
+
+1. After an 8-second startup delay, hits the GitHub Releases API (`/repos/MridulHarsh/landrop/releases/latest`)
+2. Compares the release tag against the local `package.json` version using semver
+3. If a newer version exists, finds the right installer asset (`.dmg` for macOS, `.exe` for Windows)
+4. Downloads it in the background to a temp folder, with progress shown in a banner at the top of the app
+5. Once ready, the banner shows **Install & Restart** — clicking it opens the installer and quits the app
+6. The user can click **Later** to dismiss the banner for the current session
+
+No polling, no background service — just a single check on launch. The GitHub Actions workflow automatically creates releases with installers attached when you push a version tag.
+
 ---
 
 ## Quick Start
@@ -138,7 +152,7 @@ All transfers use plain HTTP for simplicity and compatibility:
 ### Development
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/landrop.git
+git clone https://github.com/MridulHarsh/landrop.git
 cd landrop
 npm install
 npm start
@@ -158,10 +172,10 @@ npm run build:all
 ```
 
 Output goes to `dist/`:
-- **macOS** → `LANDrop-1.1.1.dmg`
-- **Windows** → `LANDrop-Setup-1.1.1.exe` (per-user install, no admin required)
+- **macOS** → `LANDrop-1.2.0.dmg`
+- **Windows** → `LANDrop-Setup-1.2.0.exe` (per-user install, no admin required)
 
-Pushing a version tag (e.g. `git push origin v1.1.1`) triggers the GitHub Actions workflow which builds both installers automatically.
+Pushing a version tag (e.g. `git push origin v1.2.0`) triggers the GitHub Actions workflow which builds both installers and creates a GitHub Release with the files attached automatically.
 
 ---
 
@@ -209,6 +223,7 @@ landrop/
 │                             ├── MAC-based peer blocking
 │                             ├── Windows firewall auto-configuration
 │                             ├── Throttled renderer updates (300ms batching)
+│                             ├── Auto-updater (GitHub Releases API + background download)
 │                             └── Resumable download persistence
 ├── preload.js              # Secure IPC bridge (contextIsolation)
 ├── renderer/
@@ -324,6 +339,11 @@ LANDrop is designed to work on typical college/office networks:
 
 ## Changelog
 
+### v1.2.0
+- **Auto-update system** — checks GitHub Releases on launch, downloads the correct installer (.dmg/.exe) in the background, shows a banner with progress, and prompts to install with one click
+- **GitHub Actions release pipeline** — pushing a version tag now automatically builds both installers and creates a GitHub Release with the files attached
+- GitHub repo URL set to `MridulHarsh/landrop`
+
 ### v1.1.1
 - **Fire-once discovery model** — campus-wide UDP blast runs only on startup instead of every 60 seconds, reducing steady-state CPU/network usage to near zero
 - **Throttled renderer updates** — peer list changes are batched in 300ms windows instead of firing on every UDP beacon
@@ -354,6 +374,7 @@ Hard-won lessons from building this on a real college LAN:
 - **Windows paths need special escaping** — backslashes in paths like `C:\Users\...` break when injected into inline JavaScript via HTML.
 - **Peer liveness must be actively probed** — relying on mDNS browser restarts leaves stale peers visible; use HTTP health checks.
 - **Throttle IPC to the renderer** — sending `peers-updated` on every UDP beacon received can flood Electron's IPC and freeze the UI. Batch updates with a timer.
+- **GitHub Release assets ≠ workflow artifacts** — `actions/upload-artifact` stores files internally for the workflow, but the auto-updater needs files attached to a GitHub Release via `softprops/action-gh-release`. These are two different systems.
 
 ---
 

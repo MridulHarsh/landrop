@@ -61,6 +61,11 @@ contextBridge.exposeInMainWorld('landrop', {
   getKnownPeers: () => ipcRenderer.invoke('get-known-peers'),
   removeKnownPeer: (opts) => ipcRenderer.invoke('remove-known-peer', opts),
 
+  // Auto-Update
+  installUpdate: () => ipcRenderer.invoke('install-update'),
+  dismissUpdate: () => ipcRenderer.invoke('dismiss-update'),
+  getUpdateStatus: () => ipcRenderer.invoke('get-update-status'),
+
   // Events
   onPeersUpdated: (cb) => ipcRenderer.on('peers-updated', (_, data) => cb(data)),
   onTransferStarted: (cb) => ipcRenderer.on('transfer-started', (_, data) => cb(data)),
@@ -73,5 +78,8 @@ contextBridge.exposeInMainWorld('landrop', {
   onChatMessage: (cb) => ipcRenderer.on('chat-message', (_, data) => cb(data)),
   onChatAck: (cb) => ipcRenderer.on('chat-ack', (_, data) => cb(data)),
   onChatConversationsUpdated: (cb) => ipcRenderer.on('chat-conversations-updated', () => cb()),
+  onUpdateAvailable: (cb) => ipcRenderer.on('update-available', (_, data) => cb(data)),
+  onUpdateReady: (cb) => ipcRenderer.on('update-ready', (_, data) => cb(data)),
+  onUpdateDownloadProgress: (cb) => ipcRenderer.on('update-download-progress', (_, data) => cb(data)),
   respondToTransferRequest: (opts) => ipcRenderer.invoke('respond-to-transfer-request', opts),
 });
