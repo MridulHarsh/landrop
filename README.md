@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-blue" alt="Platform">
   <img src="https://img.shields.io/badge/built%20with-Electron-47848f" alt="Electron">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-  <img src="https://img.shields.io/badge/version-1.2.0-orange" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.2.1-orange" alt="Version">
 </p>
 
 ---
@@ -115,6 +115,7 @@ Discovery uses a **blast-on-launch, listen-forever** approach that keeps CPU and
 
 **New peer joins the network:**
 - That peer does its own startup blast → every existing peer's UDP listener picks it up automatically
+- Each existing peer immediately sends a **unicast reply** back to the new peer's IP, so the new peer discovers them too (mutual discovery handshake, added in v1.2.1)
 
 **Manual Refresh (escape hatch):**
 - The Refresh button triggers a full re-discovery: campus blast + subnet scan + mDNS restart + peer liveness check
@@ -172,10 +173,10 @@ npm run build:all
 ```
 
 Output goes to `dist/`:
-- **macOS** → `LANDrop-1.2.0.dmg`
-- **Windows** → `LANDrop-Setup-1.2.0.exe` (per-user install, no admin required)
+- **macOS** → `LANDrop-1.2.1.dmg`
+- **Windows** → `LANDrop-Setup-1.2.1.exe` (per-user install, no admin required)
 
-Pushing a version tag (e.g. `git push origin v1.2.0`) triggers the GitHub Actions workflow which builds both installers and creates a GitHub Release with the files attached automatically.
+Pushing a version tag (e.g. `git push origin v1.2.1`) triggers the GitHub Actions workflow which builds both installers and creates a GitHub Release with the files attached automatically.
 
 ---
 
@@ -338,6 +339,9 @@ LANDrop is designed to work on typical college/office networks:
 ---
 
 ## Changelog
+
+### v1.2.1
+- **Mutual discovery handshake** — when an existing peer receives a beacon from a new unknown peer, it immediately sends a unicast reply back so the new peer discovers it too. Fixes the issue where newly connected peers couldn't see already-online peers across VLANs.
 
 ### v1.2.0
 - **Auto-update system** — checks GitHub Releases on launch, downloads the correct installer (.dmg/.exe) in the background, shows a banner with progress, and prompts to install with one click

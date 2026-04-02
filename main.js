@@ -1113,6 +1113,17 @@ function startUDPDiscovery() {
         });
         schedulePeerUpdate();
 
+        // ── Reply: send our beacon back directly so the new peer discovers us ──
+        // Without this, the fire-once model has a gap: the new peer blasts on
+        // startup and WE hear them, but they never hear us (our broadcast only
+        // covers the local subnet, not cross-VLAN). Sending a unicast reply
+        // to their IP ensures mutual discovery instantly.
+        try {
+          const replyBuf = cachedBeaconBuf || buildBeaconBuffer();
+          udpSocket.send(replyBuf, 0, replyBuf.length, UDP_BROADCAST_PORT, peerIP);
+          dlog('udp', 'reply-sent', { ip: peerIP, name: peerName });
+        } catch (e) {}
+
         const p = peers.get(peerId);
         if (p) setTimeout(() => syncCatalogFromPeer(p), 1000);
       } catch (e) {
