@@ -121,7 +121,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else if (action === 'chat-with-peer') {
       openChatWith(btn.dataset.peer, btn.dataset.name);
     } else if (action === 'unblock-peer') {
-      unblockPeer(btn.dataset.mac);
+      unblockPeer(btn.dataset.mac, btn.dataset.name);
     } else if (action === 'block-peer') {
       e.stopPropagation();
       blockPeer(btn.dataset.peer, btn.dataset.name);
@@ -658,9 +658,6 @@ async function removeKnownPeer(ip) {
   loadKnownPeers();
 }
 
-// Make it accessible from inline onclick
-window.removeKnownPeer = removeKnownPeer;
-
 async function showDiagStatus() {
   const el = document.getElementById('diag-status');
   el.style.display = 'block';
@@ -680,8 +677,8 @@ async function showDiagStatus() {
       `UDP Socket Active:  ${s.udpSocketActive ? '✅ YES' : '❌ NO'}`,
       `UDP Broadcast Port: ${s.udpPort}`,
       `Beacon Server:      ${s.beaconActive ? '✅ Listening on port ' + s.beaconPort : '❌ NOT running'}`,
-      `Subnet Scanner:     ${s.scannerActive ? '✅ Active (every 30s)' : '❌ NOT running'}`,
-      `UDP Campus Blaster: ${s.udpBlasterActive ? '✅ Active (every 60s, ~65K unicast beacons)' : '❌ NOT running'}`,
+      `Subnet Scanner:     fire-once at startup (manual refresh triggers re-scan)`,
+      `UDP Campus Blaster: fire-once at startup (manual refresh triggers ~65K unicast beacons)`,
       `Firewall Rules:     ${s.firewallConfigured ? '✅ Applied' : '⚠️ Not applied (Windows only)'}`,
       ``,
       `=== Network Interfaces ===`,
@@ -689,7 +686,7 @@ async function showDiagStatus() {
       ``,
       `=== Discovered Peers (${s.peerCount}) ===`,
       ...s.peers.map(p => `  ${p.name} [${p.platform}] — ${p.addresses.join(', ')}:${p.port} (host: ${p.host}) — seen ${Math.round((Date.now() - p.lastSeen)/1000)}s ago`),
-      s.peerCount === 0 ? '  (none — UDP blaster runs at startup + every 60s)' : '',
+      s.peerCount === 0 ? '  (none — UDP blaster runs once at startup; use Refresh to re-scan)' : '',
       ``,
       `Log entries: ${s.logCount}`,
     ];
@@ -759,7 +756,7 @@ async function loadSettings() {
               <div style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);">${escapeHtml(b.mac)}${platformLabel ? ' · ' + platformLabel : ''}${dateStr ? ' · blocked ' + dateStr : ''}</div>
             </div>
           </div>
-          <button class="btn btn-ghost btn-sm" data-action="unblock-peer" data-mac="${escapeHtml(b.mac)}" style="flex-shrink:0;">Unblock</button>
+          <button class="btn btn-ghost btn-sm" data-action="unblock-peer" data-mac="${escapeHtml(b.mac)}" data-name="${escapeHtml(b.name)}" style="flex-shrink:0;">Unblock</button>
         </div>`;
     }).join('');
   }
@@ -1153,7 +1150,12 @@ function formatBytes(bytes) {
 
 function escapeHtml(str) {
   if (!str) return '';
-  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(str)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
 
 function escapeJs(str) {
@@ -1344,7 +1346,7 @@ async function unblockPeer(mac, name) {
   if (result.error) {
     showToast(`Failed to unblock: ${result.error}`, 'error');
   } else {
-    showToast(`Unblocked ${name}`, 'success');
+    showToast(`Unblocked ${name || 'peer'}`, 'success');
     if (currentView === 'settings') loadSettings();
     await refreshPeers();
   }

@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-blue" alt="Platform">
   <img src="https://img.shields.io/badge/built%20with-Electron-47848f" alt="Electron">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-  <img src="https://img.shields.io/badge/version-1.2.3-orange" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.2.4-orange" alt="Version">
 </p>
 
 ---
@@ -174,10 +174,10 @@ npm run build:all
 ```
 
 Output goes to `dist/`:
-- **macOS** → `LANDrop-1.2.3.dmg`
-- **Windows** → `LANDrop-Setup-1.2.3.exe` (per-user install, no admin required)
+- **macOS** → `LANDrop-1.2.4.dmg`
+- **Windows** → `LANDrop-Setup-1.2.4.exe` (per-user install, no admin required)
 
-Pushing a version tag (e.g. `git push origin v1.2.3`) triggers the GitHub Actions workflow which builds both installers and creates a GitHub Release with the files attached automatically.
+Pushing a version tag (e.g. `git push origin v1.2.4`) triggers the GitHub Actions workflow which builds both installers and creates a GitHub Release with the files attached automatically.
 
 ---
 
@@ -346,6 +346,16 @@ LANDrop is designed to work on typical college/office networks:
 ---
 
 ## Changelog
+
+### v1.2.4
+- **Security fix: path-prefix traversal in `/api/download`** — a shared folder name could be matched as a prefix of a sibling folder. Sharing `/home/user/docs` would have also allowed downloads from `/home/user/docs_private/...`. The handler now requires either an exact folder match or a path separator boundary before treating a request as allowed
+- **Range header validation** — malformed or out-of-bounds `Range` headers (e.g. negative start, end beyond file size, non-numeric) could produce `NaN` offsets, a lying `Content-Length`, and corrupt transfer state. Ranges are now strictly regex-validated against file bounds and rejected with `416 Range Not Satisfiable` when invalid
+- **Swarm download hang fix** — an unexpected throw inside the async chunk handler could leave the outer Promise unresolved, hanging the download forever with no error surfaced. Added `.catch` on the chunk promise chain and on the fire-and-forget `performSwarmDownload` call from the IPC handler
+- **Sender-side false-positive "Peer disconnected" on swarm chunks** — every partial range request (i.e. every swarm chunk served) was incorrectly flagged as a disconnect because `res.on('close')` fires on both successful completion and abort, and the completion check `uploaded >= stat.size` was never true for a partial range. Split into `res.on('finish')` (success) vs `res.on('close')` (aborted) so swarm chunks no longer show up as failed uploads
+- **TOCTOU `fs.statSync` crashes** — three paths (`retryInterruptedDownloads`, `retry-download` IPC, `select-files-to-send` IPC) called `fs.statSync` right after `fs.existsSync` without handling the race where the file disappears between the two calls. Each now wraps the stat in try/catch so a file removed at exactly the wrong moment no longer crashes the process
+- **Push upload file-stream leak on request error** — when an HTTP request errored or timed out mid-upload, the file read stream kept pumping bytes into a destroyed socket. The read stream is now torn down alongside the request, and the request is destroyed on read errors
+- **Global chat fan-out is now parallel** — global messages were sent sequentially, so one slow peer could block delivery to all other peers for up to 65 seconds (the HTTP timeout). Now dispatched in parallel via `Promise.allSettled`
+- **Renderer polish** — `escapeHtml` now also escapes single quotes (defensive); `unblockPeer` button passes the peer name so the success toast no longer reads "Unblocked undefined"; Discovery Diagnostics no longer claims "Subnet Scanner active every 30s" / "UDP Campus Blaster active every 60s" since both are fire-once at startup under the v1.1.1 model
 
 ### v1.2.3
 - **Version number displayed in Settings** — Network Info card now shows the current app version

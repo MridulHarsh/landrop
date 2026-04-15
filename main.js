@@ -796,9 +796,15 @@ function createServer() {
     const resolved = path.resolve(filePath);
     const allowed = sharedFolders.some(f => {
       const resolvedFolder = path.resolve(f);
-      // Windows paths are case-insensitive
-      if (process.platform === 'win32') return resolved.toLowerCase().startsWith(resolvedFolder.toLowerCase());
-      return resolved.startsWith(resolvedFolder);
+      // Must be equal to the folder OR inside it (with separator boundary).
+      // Without the separator check, shared "/home/user/docs" would match
+      // "/home/user/docs_private/file" — prefix match without boundary.
+      const withSep = resolvedFolder.endsWith(path.sep) ? resolvedFolder : resolvedFolder + path.sep;
+      if (process.platform === 'win32') {
+        const r = resolved.toLowerCase(), rf = resolvedFolder.toLowerCase(), ws = withSep.toLowerCase();
+        return r === rf || r.startsWith(ws);
+      }
+      return resolved === resolvedFolder || resolved.startsWith(withSep);
     });
     if (!allowed) return res.status(403).json({ error: 'Not shared' });
     if (!fs.existsSync(resolved)) return res.status(404).json({ error: 'Not found' });
@@ -816,40 +822,61 @@ function createServer() {
 
     // Track this upload
     const transferId = uuidv4();
-    const range = req.headers.range;
-    const resumeFrom = range ? parseInt(range.replace(/bytes=/, '').split('-')[0], 10) : 0;
-    let uploaded = resumeFrom;
-    let lastTime = Date.now();
-    let lastBytes = resumeFrom;
+    const rangeHeader = req.headers.range;
 
-    activeTransfers.set(transferId, { fileName, fileSize: stat.size, downloaded: resumeFrom, status: 'uploading', peerName: requesterName });
+    // Parse & validate the Range header. Reject malformed/out-of-bounds ranges
+    // with 416 rather than letting NaN/negative values corrupt state.
+    let rangeStart = 0, rangeEnd = stat.size - 1, isRanged = false;
+    if (rangeHeader) {
+      const m = /^bytes=(\d+)-(\d*)$/.exec(rangeHeader);
+      if (m) {
+        const s = parseInt(m[1], 10);
+        const e = m[2] ? parseInt(m[2], 10) : stat.size - 1;
+        if (Number.isFinite(s) && Number.isFinite(e) && s >= 0 && s < stat.size && e >= s && e < stat.size) {
+          rangeStart = s; rangeEnd = e; isRanged = true;
+        } else {
+          return res.status(416).set('Content-Range', `bytes */${stat.size}`).end();
+        }
+      } else {
+        return res.status(416).set('Content-Range', `bytes */${stat.size}`).end();
+      }
+    }
+
+    let uploaded = rangeStart;
+    let lastTime = Date.now();
+    let lastBytes = rangeStart;
+
+    activeTransfers.set(transferId, { fileName, fileSize: stat.size, downloaded: rangeStart, status: 'uploading', peerName: requesterName });
     sendToRenderer('transfer-started', { id: transferId, fileName, fileSize: stat.size, type: 'upload', to: requesterName });
 
-    // Track progress as data is sent
-    res.on('close', () => {
+    // Use res.on('finish') to detect successful completion (all bytes sent).
+    // 'close' fires on both normal and abnormal end — checking uploaded>=stat.size
+    // there misclassifies partial range requests (e.g. swarm chunks) as disconnects.
+    let finishedOK = false;
+    res.on('finish', () => {
+      finishedOK = true;
       const t = activeTransfers.get(transferId);
       if (t) {
-        if (uploaded >= stat.size) {
-          t.status = 'complete';
-          sendToRenderer('transfer-complete', { id: transferId });
-        } else {
-          // Client disconnected early
-          activeTransfers.delete(transferId);
-          sendToRenderer('transfer-error', { id: transferId, error: 'Peer disconnected' });
-        }
+        t.status = 'complete';
+        sendToRenderer('transfer-complete', { id: transferId });
+      }
+    });
+    res.on('close', () => {
+      if (finishedOK) return;
+      const t = activeTransfers.get(transferId);
+      if (t) {
+        activeTransfers.delete(transferId);
+        sendToRenderer('transfer-error', { id: transferId, error: 'Peer disconnected' });
       }
     });
 
-    if (range) {
-      const parts = range.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+    if (isRanged) {
       res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${stat.size}`, 'Accept-Ranges': 'bytes',
-        'Content-Length': end - start + 1, 'Content-Type': 'application/octet-stream',
+        'Content-Range': `bytes ${rangeStart}-${rangeEnd}/${stat.size}`, 'Accept-Ranges': 'bytes',
+        'Content-Length': rangeEnd - rangeStart + 1, 'Content-Type': 'application/octet-stream',
         'Content-Disposition': `attachment; filename="${fileName}"`,
       });
-      const stream = fs.createReadStream(resolved, { start, end });
+      const stream = fs.createReadStream(resolved, { start: rangeStart, end: rangeEnd });
       stream.on('data', (chunk) => {
         uploaded += chunk.length;
         const now = Date.now(); const dt = (now - lastTime) / 1000;
@@ -1788,9 +1815,15 @@ async function retryInterruptedDownloads() {
   for (const dl of toRetry) {
     const peer = peers.get(dl.peerId);
     if (!peer) continue; // peer not online yet
-    // Check if partial file still exists
-    if (!fs.existsSync(dl.destPath)) { removeInterruptedDownload(dl.peerId, dl.filePath); continue; }
-    const currentSize = fs.statSync(dl.destPath).size;
+    // Stat with error handling — the file could be removed between existsSync and statSync
+    let currentSize = 0;
+    try {
+      currentSize = fs.statSync(dl.destPath).size;
+    } catch (e) {
+      // Partial file is gone — drop the entry and move on
+      removeInterruptedDownload(dl.peerId, dl.filePath);
+      continue;
+    }
     if (currentSize >= dl.fileSize) { removeInterruptedDownload(dl.peerId, dl.filePath); continue; }
     // Resume it
     removeInterruptedDownload(dl.peerId, dl.filePath);
@@ -2035,6 +2068,9 @@ async function performSwarmDownload({ sources, fileName, fileSize, fileHash }) {
       while (running < maxConcurrent && nextChunk < totalChunks && !failed) {
         const ci = nextChunk++;
         running++;
+        // .catch guards against any unexpected synchronous throw inside the
+        // async body — without it, the outer Promise would never resolve and
+        // the download would hang forever.
         downloadChunkFromAnySource(ci).then((ok) => {
           running--;
           if (ok) {
@@ -2045,6 +2081,11 @@ async function performSwarmDownload({ sources, fileName, fileSize, fileHash }) {
             failed = true;
             resolve();
           }
+        }).catch((e) => {
+          running--;
+          failed = true;
+          dlog('swarm', 'chunk-unexpected-error', e && e.message ? e.message : String(e));
+          resolve();
         });
       }
     }
@@ -2361,8 +2402,10 @@ function setupIPC() {
       // Single source — use the existing resumable download
       performDownload({ peerId, filePath, fileName, fileSize });
     } else {
-      // Multi-source swarm download
-      performSwarmDownload({ sources, fileName, fileSize, fileHash });
+      // Multi-source swarm download (async; catch unhandled rejections)
+      performSwarmDownload({ sources, fileName, fileSize, fileHash }).catch((e) => {
+        writeLog('ERROR', 'swarm', 'unexpected', e && e.message ? e.message : String(e));
+      });
     }
 
     return { ok: true, sources: sources.length };
@@ -2422,7 +2465,9 @@ function setupIPC() {
     const peer = peers.get(peerId);
     if (!peer) return { error: 'Peer offline' };
     let resumeFrom = 0;
-    if (destPath && fs.existsSync(destPath)) resumeFrom = fs.statSync(destPath).size;
+    if (destPath) {
+      try { resumeFrom = fs.statSync(destPath).size; } catch (e) { resumeFrom = 0; }
+    }
     removeInterruptedDownload(peerId, filePath);
     performDownload({ peerId, filePath, fileName, fileSize, destPath, resumeFrom });
     return { ok: true };
@@ -2458,17 +2503,19 @@ function setupIPC() {
 
       function done(err) { if (finished) return; finished = true; if (err) { activeTransfers.delete(transferId); sendToRenderer('transfer-error', { id: transferId, error: err }); resolve({ error: err }); } else { const t = activeTransfers.get(transferId); if (t) t.status = 'complete'; sendToRenderer('transfer-complete', { id: transferId }); resolve({ ok: true }); } }
 
+      const rs = fs.createReadStream(filePath);
       const req = http.request({ hostname: addr, port: peer.port, path: `/api/push-upload?token=${encodeURIComponent(consentResponse.token)}`, method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': totalLength } }, (res) => {
         let body = ''; res.on('data', (d) => body += d);
         res.on('end', () => { try { const r = JSON.parse(body); if (r.error) return done(r.error); } catch (e) {} done(null); });
         res.on('error', (e) => done(e.message));
       });
-      req.on('error', (e) => done(e.message));
-      req.setTimeout(120000, () => { req.destroy(); done('Upload timed out'); });
+      // If the request fails, also tear down the file read stream so it doesn't
+      // keep pumping data into a destroyed socket (which would throw).
+      req.on('error', (e) => { try { rs.destroy(); } catch (x) {} done(e.message); });
+      req.setTimeout(120000, () => { req.destroy(); try { rs.destroy(); } catch (x) {} done('Upload timed out'); });
       req.write(headerBuf);
 
-      const rs = fs.createReadStream(filePath);
-      rs.on('error', (e) => { req.destroy(); done(`Read error: ${e.message}`); });
+      rs.on('error', (e) => { try { req.destroy(); } catch (x) {} done(`Read error: ${e.message}`); });
       rs.on('data', (chunk) => {
         uploaded += chunk.length;
         const ok = req.write(chunk); if (!ok) { rs.pause(); req.once('drain', () => rs.resume()); }
@@ -2483,7 +2530,13 @@ function setupIPC() {
 
   ipcMain.handle('select-files-to-send', async () => {
     const r = await dialog.showOpenDialog(mainWindow, { properties: ['openFile', 'multiSelections'], title: 'Select Files to Send' });
-    return r.canceled ? [] : r.filePaths.map(fp => ({ path: fp, name: path.basename(fp), size: fs.statSync(fp).size }));
+    if (r.canceled) return [];
+    // Stat each selected file; skip any that disappeared between the dialog and now
+    const out = [];
+    for (const fp of r.filePaths) {
+      try { out.push({ path: fp, name: path.basename(fp), size: fs.statSync(fp).size }); } catch (e) {}
+    }
+    return out;
   });
 
   // ── Chat IPC ────────────────────────────────────────────────────────────────
@@ -2498,13 +2551,15 @@ function setupIPC() {
       addMessageToConvo(localConvoId, { ...msg, peerName });
 
       if (isGlobal) {
+        // Fan out in parallel — one slow peer (up to the 65s httpPost timeout)
+        // must not block delivery to everyone else.
         const onlinePeers = getVisiblePeers();
+        const results = await Promise.allSettled(
+          onlinePeers.map(p => sendChatToPeer(p.id, text, 'global'))
+        );
         let deliveredCount = 0;
-        for (const p of onlinePeers) {
-          try {
-            const result = await sendChatToPeer(p.id, text, 'global');
-            if (result && result.delivered) deliveredCount++;
-          } catch (e) {}
+        for (const r of results) {
+          if (r.status === 'fulfilled' && r.value && r.value.delivered) deliveredCount++;
         }
         if (deliveredCount > 0) {
           const convo = chatHistory['global'];
